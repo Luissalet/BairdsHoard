@@ -1,0 +1,13 @@
+data/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+*.log
+native/bairdcap.exe
+native/bairdcap.new.exe
+native/*.pdb
