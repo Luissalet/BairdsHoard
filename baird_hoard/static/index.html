@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="es" data-hoard-app="baird">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#141a1c">
+  <title>Baird's Hoard</title>
+  <link rel="icon" href="/icon-192.png">
+  <link rel="stylesheet" href="/hoard-theme.css">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="/icon-192.png" alt="" class="brand-icon">
+      <span class="brand-name">Baird's Hoard</span>
+    </div>
+    <div id="chip" class="chip" data-state="starting"><span class="dot"></span><span id="chip-text">Conectando…</span></div>
+    <div class="top-actions">
+      <button class="btn ghost" id="btn-folder" title="Abrir la carpeta en el Explorador">Carpeta</button>
+      <button class="btn ghost" id="btn-settings" title="Ajustes">Ajustes</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage-wrap">
+      <div class="stage" id="stage">
+        <video id="video" muted playsinline autoplay></video>
+        <div class="stage-msg" id="stage-msg" hidden>
+          <div class="stage-msg-title" id="stage-msg-title"></div>
+          <div class="stage-msg-hint" id="stage-msg-hint"></div>
+        </div>
+        <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span><span id="rec-time">0:00</span></div>
+        <div class="flash" id="flash"></div>
+      </div>
+      <div class="controls">
+        <button class="btn primary big" id="btn-shot" title="Captura (C)"><span class="ico">◉</span> Captura <kbd>C</kbd></button>
+        <button class="btn big" id="btn-clip" title="Guardar los últimos segundos (B)"><span class="ico">⟲</span> <span id="clip-label">Últimos 30 s</span> <kbd>B</kbd></button>
+        <button class="btn big" id="btn-rec" title="Grabar (R)"><span class="ico rec-ico">●</span> <span id="rec-label">Grabar</span> <kbd>R</kbd></button>
+        <span class="spacer"></span>
+        <span class="meta" id="meta"></span>
+        <button class="btn icon" id="btn-mute" title="Sonido (M)">🔇</button>
+        <button class="btn icon" id="btn-full" title="Pantalla completa (F)">⛶</button>
+      </div>
+    </section>
+
+    <aside class="side">
+      <div class="side-head">
+        <h2>Recientes</h2>
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-kind="all">Todo</button>
+          <button class="tab" data-kind="image">Capturas</button>
+          <button class="tab" data-kind="video">Vídeos</button>
+        </div>
+      </div>
+      <p class="side-tip">Arrastra una tarjeta al chat o pulsa <b>Copiar</b> y pega con Ctrl+V.</p>
+      <div class="empty" id="empty" hidden>Aún no hay capturas. Pulsa <b>Captura</b> o la tecla C.</div>
+      <ul class="items" id="items"></ul>
+    </aside>
+  </main>
+
+  <dialog id="settings" class="dialog">
+    <form method="dialog" id="settings-form">
+      <h2>Ajustes</h2>
+      <label class="row switch"><input type="checkbox" name="capture_enabled"> <span>Captura activada <small>(desactívala para usar la capturadora en otro programa)</small></span></label>
+      <label class="row"><span>Capturadora</span><select name="device" id="sel-device"></select></label>
+      <label class="row"><span>Audio</span>
+        <select name="audio_input"><option value="hdmi">HDMI (el sonido del ordenador)</option><option value="line">Entrada de línea (3,5 mm)</option></select></label>
+      <label class="row"><span>Formato de captura</span>
+        <select name="snapshot_format"><option value="png">PNG (píxeles exactos)</option><option value="jpg">JPG (más ligero)</option></select></label>
+      <label class="row"><span>Duración del clip</span>
+        <select name="clip_seconds"><option>10</option><option>15</option><option>30</option><option>45</option><option>60</option><option>90</option><option>120</option></select></label>
+      <label class="row"><span>Memoria (segundos guardados)</span>
+        <select name="buffer_seconds"><option>60</option><option>120</option><option>180</option><option>300</option><option>600</option></select></label>
+      <label class="row"><span>Carpeta</span><input name="media_dir" type="text" placeholder="Por defecto: Vídeos\Baird"></label>
+      <label class="row"><span>Copia ligera</span>
+        <span class="pair"><select name="light_height"><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option></select>
+        <select name="light_kbps"><option value="1200">1,2 Mb/s</option><option value="2500">2,5 Mb/s</option><option value="4000">4 Mb/s</option><option value="6000">6 Mb/s</option></select></span></label>
+      <div class="dialog-actions">
+        <button class="btn" value="cancel">Cancelar</button>
+        <button class="btn primary" id="settings-save" value="save">Guardar</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

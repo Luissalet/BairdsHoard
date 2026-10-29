@@ -1,0 +1,84 @@
+{
+  "schema": 1,
+  "id": "baird",
+  "name": "Baird's Hoard",
+  "purpose": "Shows the screen of another computer connected through an HDMI capture device (AVerMedia Live Gamer Portable Lite GL310 / C875) live in a window, and with one click saves a screenshot, the last seconds as a clip or a recording; every file can be dragged or copied straight into a chat. Assistants can look at that screen (the picture comes back as an image) and save screenshots, clips and recordings.",
+  "capabilities": [
+    "hdmi-capture",
+    "live-view",
+    "screenshot",
+    "instant-replay",
+    "recording",
+    "drag-and-drop",
+    "clipboard",
+    "light-copy",
+    "screen-look",
+    "avermedia-lgp"
+  ],
+  "x-family": {
+    "copilot": true
+  },
+  "placeholders": [
+    "BAIRD_DIR",
+    "APP_URL",
+    "TOKEN_FILE",
+    "PYTHON"
+  ],
+  "defaults": {
+    "APP_URL": "http://127.0.0.1:5232",
+    "TOKEN_FILE": "{BAIRD_DIR}/data/mcp-token",
+    "PYTHON": "{BAIRD_DIR}/.venv/Scripts/python.exe"
+  },
+  "app": {
+    "url_default": "http://127.0.0.1:5232",
+    "ui_url": "{APP_URL}",
+    "health": {
+      "path": "/api/health",
+      "expect": {
+        "service": "bairds-hoard"
+      }
+    },
+    "identify": {
+      "service": [
+        "bairds-hoard"
+      ],
+      "title": [
+        "baird's hoard"
+      ]
+    },
+    "launch_hint": {
+      "kind": "process",
+      "executable": "{PYTHON}",
+      "argv": [
+        "-m",
+        "baird_hoard",
+        "--no-browser"
+      ],
+      "cwd": "{BAIRD_DIR}",
+      "env": {
+        "PORT_STRICT": "1",
+        "BAIRD_PORT": "5232"
+      },
+      "readiness": {
+        "url": "{APP_URL}/api/health",
+        "timeout_s": 40
+      }
+    }
+  },
+  "mcp": {
+    "transport": "stdio",
+    "command": "{PYTHON}",
+    "args": [
+      "{BAIRD_DIR}/mcp_server.py"
+    ],
+    "env": {
+      "BAIRD_URL": "{APP_URL}",
+      "BAIRD_TOKEN_FILE": "{TOKEN_FILE}"
+    },
+    "optional_env": [
+      "BAIRD_BRIDGE_AUTOSTART",
+      "BAIRD_DATA_DIR"
+    ]
+  },
+  "notes": "screen_look returns the current picture of the other computer as an image (and keeps it as a screenshot unless save=false); media_look shows a saved file. clip_save copies the last seconds from memory without re-encoding; record_start / record_stop record picture and sound. Files live in the media folder (default Videos\\Baird); media_list gives their paths. The device needs the AVerMedia GL310 driver (AVer835_x64.inf, WHQL) and nothing else from AVerMedia: the app reads the hardware H.264 encoder directly. Pictures of the other computer may show private information."
+}
