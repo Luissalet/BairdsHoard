@@ -31,7 +31,7 @@ kbd {
 .chip[data-state="running"] .dot { background: var(--hoard-success); box-shadow: 0 0 8px var(--hoard-success); }
 .chip[data-state="running"] { color: var(--hoard-text); }
 .chip[data-state="no_signal"] .dot, .chip[data-state="starting"] .dot { background: var(--hoard-warning); }
-.chip[data-state="no_device"] .dot, .chip[data-state="error"] .dot { background: var(--hoard-danger); }
+.chip[data-state="no_device"] .dot, .chip[data-state="error"] .dot, .chip[data-state="stuck"] .dot { background: var(--hoard-danger); }
 
 /* ---------------------------------------------------------------- buttons */
 .btn {

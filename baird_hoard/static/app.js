@@ -163,7 +163,7 @@ player.connect();
 
 const STATE_TEXT = {
   running: 'En directo', starting: 'Conectando…', no_signal: 'Sin señal', no_device: 'Sin capturadora',
-  off: 'Captura apagada', error: 'Error',
+  off: 'Captura apagada', error: 'Error', stuck: 'Bloqueada',
 };
 const STATE_HINT = {
   starting: ['Abriendo la capturadora…', ''],
@@ -171,6 +171,8 @@ const STATE_HINT = {
   no_device: ['Capturadora no conectada', 'Conecta la AVerMedia Live Gamer Portable Lite por USB.'],
   off: ['Captura apagada', 'Actívala en Ajustes.'],
   error: ['No se pudo abrir la capturadora', ''],
+  stuck: ['La capturadora no responde',
+    'Desenchufa su USB, espera cinco segundos y vuelve a enchufarlo. Baird la recupera solo.'],
 };
 
 async function refreshStatus() {

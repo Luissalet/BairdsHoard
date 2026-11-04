@@ -61,3 +61,25 @@ crossbar ─► AVerMedia C835 Capture ─► AVerMedia C835 H264 Encoder ─►
   and sends it over a WebSocket to Media Source Extensions. `empty_moov` is not used: it writes the moov before the
   first AAC packet, the audio track then lacks its AudioSpecificConfig and Chrome refuses the stream.
 - `aac_adtstoasc` is needed in every MP4 remux: the device's AAC is ADTS.
+
+## When the device stops responding
+
+After a signal loss the GL310 driver can wedge: `IMediaControl.Run` fails with `0x8007001F` (*a device attached to
+the system is not functioning*), the helper's process cannot finish exiting because a request is stuck in the driver,
+and while it exists the device cannot be opened again (`no AVerMedia encoder filter accepted the device`) or
+restarted (`pnputil /restart-device` asks for a reboot). Only unplugging the USB cable (or a reboot) releases it.
+
+What Baird does about it:
+
+- `bairdcap` never waits on the driver to leave: stopping and releasing the graph get four seconds, then the process
+  terminates itself.
+- The engine reads the helper's output on its own thread and never waits without a limit: a helper that does not
+  leave four seconds after an error, sends nothing for 30 s or goes silent for 20 s is killed; one that is still
+  there six seconds after the kill marks the device `stuck`. A `run_failed 0x8007001F`, or three failures in a row,
+  also count as `stuck`.
+- In `stuck` it polls the device list every three seconds and starts again once the device disappears and comes
+  back, once the stuck helper is gone, or every minute anyway.
+- Every helper runs in a Windows job that is closed with the app, so none outlives Baird; helpers left by an earlier
+  run are ended at start-up.
+- A helper that cannot exit keeps `bairdcap.exe` open; rebuilding the helper renames it to `bairdcap.old.exe`
+  (Windows allows renaming a running program) instead of failing.

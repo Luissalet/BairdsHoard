@@ -22,6 +22,10 @@ Forma parte de la familia Hoard (Hoard Hub, Faustus). Funciona en local en Windo
 
 Otras teclas: `M` sonido, `F` pantalla completa (o doble clic en la imagen).
 
+Si el driver de la capturadora deja de responder (puede pasar cuando el otro ordenador entra en reposo), el estado
+dice **La capturadora no responde**: desenchufa su USB, espera cinco segundos y vuelve a enchufarlo; Baird vuelve a
+arrancar solo.
+
 ## Dispositivo
 
 AVerMedia Live Gamer Portable Lite (GL310, USB `07CA:C835`); la Live Gamer Portable (C875) va por el mismo camino.
