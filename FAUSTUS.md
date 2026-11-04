@@ -21,6 +21,9 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   length, memory window, media folder, light-copy size and bitrate.
 - Recover by itself after the device is unplugged, the other computer sleeps or the cable is pulled (states
   `no_device`, `no_signal`, back to `running` when the picture returns).
+- Notice when the device's driver stops responding (state `stuck`, with the hint to unplug and replug the USB cable),
+  end capture helpers left behind by an earlier run, and start again by itself once the device is plugged back in.
+  The helper never outlives the app.
 
 ## Cannot (by design or by the hardware)
 

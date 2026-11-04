@@ -18,6 +18,7 @@ class BairdError(AppError):
         "conflict": 409,
         "no_signal": 409,
         "no_device": 503,
+        "stuck": 503,
         "unavailable": 503,
         "failed": 500,
     }

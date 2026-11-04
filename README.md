@@ -19,6 +19,10 @@ Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5
 
 Other keys: `M` sound, `F` full screen (double click on the picture also).
 
+If the device's driver stops responding (it can happen when the other computer goes to sleep), the status shows
+**La capturadora no responde**: unplug the device's USB cable, wait five seconds and plug it back in; Baird starts
+again by itself.
+
 ## Hardware
 
 AVerMedia Live Gamer Portable Lite (GL310, USB id `07CA:C835`); the Live Gamer Portable (C875) uses the same path.
