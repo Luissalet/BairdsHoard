@@ -24,6 +24,10 @@
 //
 // Exit codes: 0 ok, 2 device not found, 3 graph build failed, 4 no data,
 //             5 device lost while running.
+//
+// The helper never waits on the driver to leave: stopping and releasing the
+// graph get four seconds, then the process terminates itself, so a device that
+// stopped responding does not leave a helper behind that blocks the next one.
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -73,6 +77,22 @@ static class Program
     static readonly Guid KsCategoryEncoder = new Guid("19689BF6-C384-48fd-AD51-90E58C79F70B");
 
     static readonly object logGate = new object();
+    [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr process, uint exitCode);
+
+    static int Leave(int code, Action cleanup)
+    {
+        if (cleanup != null)
+        {
+            var t = new Thread(() => { try { cleanup(); } catch { } }) { IsBackground = true };
+            t.Start();
+            if (!t.Join(4000)) Emit("warning", "\"code\":\"driver_busy\",\"message\":\"The driver did not finish stopping; leaving anyway.\"");
+        }
+        try { Console.Error.Flush(); } catch { }
+        TerminateProcess(GetCurrentProcess(), (uint)code);
+        return code;
+    }
+
     static void Emit(string evt, string fields)
     {
         lock (logGate)
@@ -271,7 +291,7 @@ static class Program
         catch (Exception e)
         {
             Emit("error", "\"code\":\"graph_failed\",\"message\":" + J(e.Message));
-            return 3;
+            return Leave(3, () => Marshal.ReleaseComObject(graph));
         }
 
         // The vendor property set may live on the encoder or on the capture filter.
@@ -294,7 +314,11 @@ static class Program
 
         var mc = (IMediaControl)graph;
         int rhr = mc.Run();
-        if (rhr < 0) { Emit("error", "\"code\":\"run_failed\",\"message\":\"IMediaControl.Run 0x" + rhr.ToString("X8") + "\""); return 3; }
+        if (rhr < 0)
+        {
+            Emit("error", "\"code\":\"run_failed\",\"message\":\"IMediaControl.Run 0x" + rhr.ToString("X8") + "\"");
+            return Leave(3, () => { mc.Stop(); Marshal.ReleaseComObject(graph); });
+        }
 
         uint w, h, cur;
         string input = GetParam(ParamCurrentResolution, out w, out h) ? ",\"input\":{\"width\":" + w + ",\"height\":" + h + "}" : "";
@@ -340,10 +364,13 @@ static class Program
                 break;
             }
         }
-        try { mc.Stop(); } catch { }
-        try { if (cb.Sink != null) cb.Sink.Dispose(); } catch { }
-        Emit("done", "\"bytes\":" + cb.Bytes);
-        Marshal.ReleaseComObject(graph);
-        return code != 0 ? code : (cb.Bytes > 0 ? 0 : 4);
+        int exit = code != 0 ? code : (cb.Bytes > 0 ? 0 : 4);
+        return Leave(exit, () =>
+        {
+            try { mc.Stop(); } catch { }
+            try { if (cb.Sink != null) cb.Sink.Dispose(); } catch { }
+            Emit("done", "\"bytes\":" + cb.Bytes);
+            Marshal.ReleaseComObject(graph);
+        });
     }
 }
