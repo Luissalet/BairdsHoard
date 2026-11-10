@@ -33,6 +33,7 @@ from .config import Config, Settings
 from .errors import BairdError
 from .hoard_link.atomic import read_json, write_json_atomic
 from .native import NO_WINDOW
+from .region import crop_filter, parse_region
 from .tsbuf import TsBuffer
 
 log = logging.getLogger("baird.media")
@@ -59,6 +60,10 @@ class Library:
         self._index: dict[str, dict[str, Any]] = read_json(config.index_path, default={}) or {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self.recorder = Recorder(self)
+        # Hooks the services set: a new screenshot exists / a file was renamed / a file was deleted.
+        self.on_new_image: Optional[Any] = None
+        self.on_rename: Optional[Any] = None
+        self.on_delete: Optional[Any] = None
         config.thumbs_dir.mkdir(parents=True, exist_ok=True)
         config.work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -184,29 +189,103 @@ class Library:
 
     # ------------------------------------------------------------------ capture actions
 
-    def snapshot(self, fmt: Optional[str] = None) -> dict[str, Any]:
-        """Save the current picture; returns its description."""
+    def input_size(self) -> Optional[tuple[int, int]]:
+        inp = self.engine.snapshot().get("input") or {}
+        if inp.get("width") and inp.get("height"):
+            return int(inp["width"]), int(inp["height"])
+        return None
+
+    def snapshot(self, fmt: Optional[str] = None, region: Optional[dict[str, Any]] = None, *,
+                 prefix: Optional[str] = None, origin: Optional[str] = None) -> dict[str, Any]:
+        """Save the current picture (or only ``region`` of it); returns its description."""
         self.engine.require_picture()
         ff = self._need_ffmpeg()
         fmt = (fmt or self.settings["snapshot_format"]).lower()
         if fmt not in ("png", "jpg"):
             raise BairdError("invalid", "fmt must be png or jpg")
+        region = parse_region(region, self.input_size())
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.", "Wait a second and try again.")
-        out = self._new_path("Captura", "." + fmt)
+        out = self._new_path(prefix or ("Captura zona" if region else "Captura"), "." + fmt)
         enc = ["-c:v", "png"] if fmt == "png" else ["-q:v", "2"]
         last_err = ""
         for index in (max(0, frames - 2), 0):
+            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
             args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an",
-                    "-vf", f"select=eq(n\\,{index})", "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(out)]
+                    "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(out)]
             proc = self._run(args, data=data, timeout=20)
             if proc.returncode == 0 and out.is_file() and out.stat().st_size > 0:
                 inp = self.engine.snapshot().get("input") or {}
-                return self._remember(out, origin="snapshot", width=inp.get("width"), height=inp.get("height"),
-                                      taken=time.time())
+                size = self._probe(out) if region else {"width": inp.get("width"), "height": inp.get("height")}
+                desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
+                                      height=size.get("height"), taken=time.time(), region=region)
+                self._fire("on_new_image", out)
+                return desc
+            out.unlink(missing_ok=True)
             last_err = proc.stderr.decode("utf-8", "replace")[-300:]
         raise BairdError("failed", "Could not decode the picture.", last_err)
+
+    def grab_gray(self, region: Optional[dict[str, Any]] = None, size: tuple[int, int] = (96, 54)) -> bytes:
+        """The newest picture (or ``region`` of it) shrunk to ``size`` in 8-bit grey: what change detection compares."""
+        ff = self._need_ffmpeg()
+        data, frames = self.buffer.latest()
+        if not data:
+            raise BairdError("no_signal", "No picture has arrived yet.")
+        region = parse_region(region, self.input_size())
+        want = size[0] * size[1]
+        for index in (max(0, frames - 2), 0):
+            vf = f"select=eq(n\\,{index})," + (crop_filter(region) + "," if region else "") + \
+                 f"scale={size[0]}:{size[1]}:flags=area,format=gray"
+            proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
+                              "-fps_mode", "passthrough", "-frames:v", "1", "-f", "rawvideo", "pipe:1"], data=data, timeout=20)
+            if proc.returncode == 0 and len(proc.stdout) == want:
+                return proc.stdout
+        raise BairdError("failed", "Could not decode the picture.")
+
+    def grab_file(self, region: Optional[dict[str, Any]], dest: Path) -> Path:
+        """The newest picture (or ``region``) as a PNG at ``dest``, outside the library (OCR input)."""
+        ff = self._need_ffmpeg()
+        data, frames = self.buffer.latest()
+        if not data:
+            raise BairdError("no_signal", "No picture has arrived yet.")
+        region = parse_region(region, self.input_size())
+        for index in (max(0, frames - 2), 0):
+            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
+            proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
+                              "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", "png", str(dest)], data=data, timeout=20)
+            if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+                return dest
+        raise BairdError("failed", "Could not decode the picture.")
+
+    def save_annotated(self, name: str, png: bytes) -> dict[str, Any]:
+        """Keep an annotated copy of the picture ``name`` as a new file; the original is not touched. ``png`` is the
+        image the browser drew (the picture with arrows, boxes and text)."""
+        src = self.path_of(name)
+        if src.suffix.lower() not in IMAGE_EXT:
+            raise BairdError("invalid", "Only screenshots can be annotated.")
+        if len(png) < 64 or png[:8] != b"\x89PNG\r\n\x1a\n":
+            raise BairdError("invalid", "The annotated picture must be a PNG.")
+        if len(png) > 80_000_000:
+            raise BairdError("invalid", "The annotated picture is too large.")
+        out = src.with_name(f"{src.stem} (anotada).png")
+        n = 2
+        while out.exists():
+            out = src.with_name(f"{src.stem} (anotada {n}).png")
+            n += 1
+        out.write_bytes(png)
+        width, height = int.from_bytes(png[16:20], "big"), int.from_bytes(png[20:24], "big")
+        desc = self._remember(out, origin="annotated", source=src.name, width=width, height=height)
+        self._fire("on_new_image", out)
+        return desc
+
+    def _fire(self, hook: str, *args: Any) -> None:
+        fn = getattr(self, hook, None)
+        if fn is not None:
+            try:
+                fn(*args)
+            except Exception:  # noqa: BLE001 - a hook must never break a capture
+                log.debug("%s failed", hook, exc_info=True)
 
     def clip(self, seconds: Optional[float] = None) -> dict[str, Any]:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
@@ -283,6 +362,7 @@ class Library:
         with self._lock:
             self._index.pop(path.name, None)
             write_json_atomic(self.config.index_path, self._index)
+        self._fire("on_delete", path.name)
         return {"deleted": path.name, "recycle_bin": to_bin}
 
     def rename(self, name: str, new_name: str) -> dict[str, Any]:
@@ -301,6 +381,7 @@ class Library:
             if entry is not None:
                 self._index[target.name] = entry
             write_json_atomic(self.config.index_path, self._index)
+        self._fire("on_rename", path.name, target.name)
         return self.describe(target)
 
     def copy_to_clipboard(self, name: str) -> dict[str, Any]:

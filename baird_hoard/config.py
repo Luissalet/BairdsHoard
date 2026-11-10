@@ -13,6 +13,7 @@ from . import APP_ID, DEFAULT_PORT
 from .hoard_link.appconfig import AppPaths, env_flag, env_int, env_str
 from .hoard_link.atomic import read_json, write_json_atomic
 from .hoard_link.guard import parse_allowed_hosts
+from .hotkeys import normalize_hotkey
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +33,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "capture_enabled": True,     # off frees the device for other programs
     "light_height": 720,         # "light copy" of a video: height in pixels
     "light_kbps": 2500,          # "light copy" of a video: video bitrate
+    "ocr_auto": True,            # read the text of every new screenshot in the background (Kafka's OCR)
+    "hotkeys_enabled": True,     # global shortcuts, also when another window has the focus
+    "hotkey_shot": "ctrl+alt+c",
+    "hotkey_clip": "ctrl+alt+x",
 }
 
 SNAPSHOT_FORMATS = ("png", "jpg")
@@ -142,4 +147,13 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     data["capture_enabled"] = bool(data["capture_enabled"])
     data["light_height"] = int(min(max(int(data["light_height"]), 240), 1080))
     data["light_kbps"] = int(min(max(int(data["light_kbps"]), 300), 20000))
+    data["ocr_auto"] = bool(data["ocr_auto"])
+    data["hotkeys_enabled"] = bool(data["hotkeys_enabled"])
+    for key in ("hotkey_shot", "hotkey_clip"):
+        try:
+            data[key] = normalize_hotkey(data[key])
+        except ValueError as exc:
+            raise ValueError(f"{key}: {exc}") from exc
+    if data["hotkey_shot"] == data["hotkey_clip"]:
+        raise ValueError("The screenshot and clip shortcuts must be different.")
     return data

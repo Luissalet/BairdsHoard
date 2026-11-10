@@ -1,6 +1,13 @@
 # Pendientes, errores y cosas a revisar
 
-Nada abierto. Los arreglos del 29-10-2026 (vista en directo fMP4, remux AAC, audio por el crossbar, avisos ocultos, cierre
+## Por comprobar con señal real (10-11-2026)
+
+Se probó todo en modo demo (API, MCP, atajos registrados en Windows, interfaz con Playwright), pero Chromium sin
+códec H.264 no reproduce el directo, así que con la capturadora conectada falta ver una vez, en la ventana Hoard:
+arrastrar la zona sobre el directo (`Z`), la vista mini (`P`) y pulsar de verdad el atajo global Ctrl+Alt+C.
+El atajo de clip por defecto es Ctrl+Alt+X porque Ctrl+Alt+B ya lo usa otro programa del PC (Ajustes lo cambia).
+
+Nada más abierto. Los arreglos del 29-10-2026 (vista en directo fMP4, remux AAC, audio por el crossbar, avisos ocultos, cierre
 de WebSocket) están en el commit d5ba419 y no necesitan seguimiento.
 
 ## Resuelto (04-11-2026)

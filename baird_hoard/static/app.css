@@ -152,3 +152,59 @@ kbd {
   .brand-name { font-size: 18px; }
   .controls kbd { display: none; }
 }
+
+/* ---------------------------------------------------------------- zone picking, search, annotate, watch */
+.zone-layer { position: absolute; inset: 0; cursor: crosshair; background: rgba(0,0,0,.28); touch-action: none; z-index: 5; }
+.zone-hint {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); padding: 6px 14px; border-radius: 999px;
+  background: rgba(0,0,0,.75); color: #fff; font-size: 13px; pointer-events: none; white-space: nowrap;
+}
+.zone-box { position: absolute; border: 2px solid var(--hoard-accent); background: rgba(255,255,255,.08); box-shadow: 0 0 0 9999px rgba(0,0,0,.45); pointer-events: none; }
+.btn.on { background: var(--hoard-accent-soft); border-color: var(--hoard-accent); }
+.btn.accent { border-color: var(--hoard-accent-line); color: var(--hoard-accent); }
+.count {
+  display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; text-align: center;
+  background: var(--hoard-accent); color: var(--hoard-accent-ink); font-size: 12px; font-weight: 600;
+}
+.searchbar { padding: 0 14px 6px; }
+.searchbar input {
+  width: 100%; height: 32px; border-radius: var(--hoard-radius-sm); border: 1px solid var(--hoard-border);
+  background: var(--hoard-deep); padding: 0 10px; font-size: 13.5px;
+}
+.search-note { margin-top: 4px; font-size: 12px; color: var(--hoard-text-dim); }
+.snip {
+  font-size: 12px; color: var(--hoard-text-muted); background: var(--hoard-deep); border-radius: 4px; padding: 2px 6px;
+  overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+.toast a { color: var(--hoard-accent); margin-left: 4px; }
+.dialog.wide { width: min(980px, 96vw); }
+.dialog-body { padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; max-height: 92vh; overflow-y: auto; }
+.dialog-body h3 { margin: 6px 0 0; font: 600 16px var(--hoard-font-serif); color: var(--hoard-text); }
+.row-note { margin: 0; font-size: 12.5px; color: var(--hoard-text-dim); }
+.empty.small { padding: 6px 2px; font-size: 13px; }
+.ann-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.seg { display: flex; gap: 2px; background: var(--hoard-deep); border-radius: var(--hoard-radius); padding: 2px; }
+.seg .btn { border-color: transparent; background: transparent; }
+.seg .btn.active { background: var(--hoard-elevated); border-color: var(--hoard-border); }
+.swatches { display: flex; gap: 6px; }
+.swatches button {
+  width: 24px; height: 24px; border-radius: 50%; border: 2px solid var(--hoard-border); background: var(--c); cursor: pointer; padding: 0;
+}
+.swatches button.active { border-color: var(--hoard-text); box-shadow: 0 0 0 2px var(--hoard-accent); }
+.ann-stage { position: relative; background: #000; border-radius: var(--hoard-radius); display: flex; justify-content: center; align-items: center; overflow: hidden; }
+#ann-canvas { max-width: 100%; max-height: 60vh; width: auto; height: auto; cursor: crosshair; touch-action: none; display: block; }
+#ann-text { position: absolute; width: 260px; height: 32px; border-radius: 6px; border: 2px solid var(--hoard-accent); background: rgba(0,0,0,.8); color: #fff; padding: 0 8px; z-index: 3; }
+.rules, .events { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.rule { display: flex; justify-content: space-between; gap: 12px; padding: 10px 12px; border-radius: var(--hoard-radius); background: var(--hoard-deep); border: 1px solid var(--hoard-border); }
+.rule.off { opacity: .6; }
+.rule-name { font-weight: 600; }
+.rule-desc, .rule-state { font-size: 12.5px; color: var(--hoard-text-dim); }
+.rule-acts { display: flex; gap: 6px; align-items: flex-start; flex-wrap: wrap; justify-content: flex-end; }
+.rule-form { display: flex; flex-direction: column; gap: 10px; }
+.rule-form .row input[type=number], .rule-form .row input[type=text] {
+  height: 34px; border-radius: var(--hoard-radius-sm); border: 1px solid var(--hoard-border); background: var(--hoard-deep); padding: 0 8px;
+}
+.zone-state { align-self: center; font-size: 13px; color: var(--hoard-text-muted); flex: 1; }
+.events li { display: flex; gap: 12px; font-size: 13px; }
+.ev-time { color: var(--hoard-text-dim); font-family: var(--hoard-font-mono); white-space: nowrap; }
+#textview-body { width: 100%; border-radius: var(--hoard-radius-sm); border: 1px solid var(--hoard-border); background: var(--hoard-deep); color: inherit; padding: 10px; font: 13px var(--hoard-font-mono); resize: vertical; }

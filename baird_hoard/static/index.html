@@ -17,6 +17,7 @@
     </div>
     <div id="chip" class="chip" data-state="starting"><span class="dot"></span><span id="chip-text">Conectando…</span></div>
     <div class="top-actions">
+      <button class="btn ghost" id="btn-watch" title="Avisar cuando cambie algo en la pantalla">Vigilar <span class="count" id="watch-count" hidden></span></button>
       <button class="btn ghost" id="btn-folder" title="Abrir la carpeta en el Explorador">Carpeta</button>
       <button class="btn ghost" id="btn-settings" title="Ajustes">Ajustes</button>
     </div>
@@ -32,13 +33,19 @@
         </div>
         <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span><span id="rec-time">0:00</span></div>
         <div class="flash" id="flash"></div>
+        <div class="zone-layer" id="zone-layer" hidden>
+          <div class="zone-hint" id="zone-hint">Arrastra sobre la imagen para elegir la zona · Esc cancela</div>
+          <div class="zone-box" id="zone-box" hidden></div>
+        </div>
       </div>
       <div class="controls">
         <button class="btn primary big" id="btn-shot" title="Captura (C)"><span class="ico">◉</span> Captura <kbd>C</kbd></button>
+        <button class="btn big" id="btn-zone" title="Capturar solo una zona: arrastra un rectángulo sobre el directo (Z)"><span class="ico">▢</span> Zona <kbd>Z</kbd></button>
         <button class="btn big" id="btn-clip" title="Guardar los últimos segundos (B)"><span class="ico">⟲</span> <span id="clip-label">Últimos 30 s</span> <kbd>B</kbd></button>
         <button class="btn big" id="btn-rec" title="Grabar (R)"><span class="ico rec-ico">●</span> <span id="rec-label">Grabar</span> <kbd>R</kbd></button>
         <span class="spacer"></span>
         <span class="meta" id="meta"></span>
+        <button class="btn icon" id="btn-pip" title="Vista mini siempre encima (P)">⧉</button>
         <button class="btn icon" id="btn-mute" title="Sonido (M)">🔇</button>
         <button class="btn icon" id="btn-full" title="Pantalla completa (F)">⛶</button>
       </div>
@@ -53,7 +60,11 @@
           <button class="tab" data-kind="video">Vídeos</button>
         </div>
       </div>
-      <p class="side-tip">Arrastra una tarjeta al chat o pulsa <b>Copiar</b> y pega con Ctrl+V.</p>
+      <div class="searchbar">
+        <input id="search" type="search" placeholder="Buscar por el texto de las capturas" autocomplete="off" aria-label="Buscar por el texto de las capturas">
+        <div class="search-note" id="search-note" hidden></div>
+      </div>
+      <p class="side-tip" id="side-tip">Arrastra una tarjeta al chat o pulsa <b>Copiar</b> y pega con Ctrl+V.</p>
       <div class="empty" id="empty" hidden>Aún no hay capturas. Pulsa <b>Captura</b> o la tecla C.</div>
       <ul class="items" id="items"></ul>
     </aside>
@@ -76,11 +87,92 @@
       <label class="row"><span>Copia ligera</span>
         <span class="pair"><select name="light_height"><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option></select>
         <select name="light_kbps"><option value="1200">1,2 Mb/s</option><option value="2500">2,5 Mb/s</option><option value="4000">4 Mb/s</option><option value="6000">6 Mb/s</option></select></span></label>
+      <label class="row switch"><input type="checkbox" name="ocr_auto"> <span>Leer el texto de las capturas <small>(OCR de Kafka's Hoard, para buscarlas por lo que muestran)</small></span></label>
+      <label class="row switch"><input type="checkbox" name="hotkeys_enabled"> <span>Atajos globales <small>(captura y clip aunque otra ventana tenga el foco)</small></span></label>
+      <label class="row"><span>Atajo de captura</span><input name="hotkey_shot" type="text" placeholder="ctrl+alt+c" autocomplete="off"></label>
+      <label class="row"><span>Atajo de clip</span><input name="hotkey_clip" type="text" placeholder="ctrl+alt+x" autocomplete="off"></label>
+      <p class="row-note" id="hotkey-note"></p>
       <div class="dialog-actions">
         <button class="btn" value="cancel">Cancelar</button>
         <button class="btn primary" id="settings-save" value="save">Guardar</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="annotate" class="dialog wide">
+    <div class="dialog-body">
+      <h2>Anotar captura</h2>
+      <div class="ann-bar">
+        <div class="seg" id="ann-tools">
+          <button class="btn small active" data-tool="arrow" title="Flecha">Flecha</button>
+          <button class="btn small" data-tool="rect" title="Recuadro">Recuadro</button>
+          <button class="btn small" data-tool="text" title="Texto: haz clic donde va">Texto</button>
+        </div>
+        <div class="swatches" id="ann-colors">
+          <button data-color="#ff3b30" style="--c:#ff3b30" class="active" title="Rojo"></button>
+          <button data-color="#ffd60a" style="--c:#ffd60a" title="Amarillo"></button>
+          <button data-color="#30d158" style="--c:#30d158" title="Verde"></button>
+          <button data-color="#0a84ff" style="--c:#0a84ff" title="Azul"></button>
+          <button data-color="#ffffff" style="--c:#ffffff" title="Blanco"></button>
+        </div>
+        <button class="btn small" id="ann-undo">Deshacer</button>
+        <button class="btn small" id="ann-clear">Borrar todo</button>
+      </div>
+      <div class="ann-stage" id="ann-stage">
+        <canvas id="ann-canvas"></canvas>
+        <input id="ann-text" type="text" hidden placeholder="Escribe y pulsa Intro">
+      </div>
+      <p class="row-note">Se guarda como una captura nueva («… (anotada)»); la original no se toca.</p>
+      <div class="dialog-actions">
+        <button class="btn" id="ann-cancel">Cancelar</button>
+        <button class="btn" id="ann-save-send">Guardar y enviar a Faustus</button>
+        <button class="btn primary" id="ann-save">Guardar copia</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="watch" class="dialog wide">
+    <div class="dialog-body">
+      <h2>Vigilar la pantalla</h2>
+      <p class="row-note">Baird mira una zona del otro ordenador y te avisa por las notificaciones de la familia (Hub) cuando pasa lo que pidas.</p>
+      <ul class="rules" id="watch-rules"></ul>
+      <div class="empty small" id="watch-empty">Todavía no hay reglas.</div>
+      <h3>Nueva regla</h3>
+      <div class="rule-form" id="watch-form">
+        <label class="row"><span>Avisar cuando</span>
+          <select id="wf-type">
+            <option value="change:change">cambie algo en la zona</option>
+            <option value="change:still">la zona deje de moverse (acabó un proceso)</option>
+            <option value="text:appears">aparezca un texto</option>
+            <option value="text:disappears">desaparezca un texto</option>
+          </select></label>
+        <label class="row"><span>Zona</span>
+          <span class="pair"><span class="zone-state" id="wf-zone-state">Toda la pantalla</span>
+          <button class="btn small" type="button" id="wf-pick">Elegir en el directo</button>
+          <button class="btn small" type="button" id="wf-all">Toda</button></span></label>
+        <label class="row" id="wf-row-threshold"><span>Umbral de cambio (%)</span><input id="wf-threshold" type="number" min="0.1" max="100" step="0.5" value="5"></label>
+        <label class="row" id="wf-row-still"><span>Quieta durante (s)</span><input id="wf-still" type="number" min="2" max="3600" value="30"></label>
+        <label class="row" id="wf-row-text"><span>Texto</span><input id="wf-text" type="text" placeholder="Terminado" autocomplete="off"></label>
+        <label class="row"><span>Nombre (opcional)</span><input id="wf-name" type="text" autocomplete="off"></label>
+        <label class="row"><span>Espera entre avisos (s)</span><input id="wf-cooldown" type="number" min="0" max="86400" value="60"></label>
+        <div class="dialog-actions"><button class="btn primary" type="button" id="wf-add">Añadir regla</button></div>
+      </div>
+      <h3>Últimos avisos</h3>
+      <ul class="events" id="watch-events"></ul>
+      <div class="empty small" id="watch-events-empty">Sin avisos todavía.</div>
+      <div class="dialog-actions"><button class="btn" id="watch-close">Cerrar</button></div>
+    </div>
+  </dialog>
+
+  <dialog id="textview" class="dialog wide">
+    <div class="dialog-body">
+      <h2 id="textview-title">Texto de la captura</h2>
+      <textarea id="textview-body" readonly rows="14"></textarea>
+      <div class="dialog-actions">
+        <button class="btn" id="textview-copy">Copiar texto</button>
+        <button class="btn primary" id="textview-close">Cerrar</button>
+      </div>
+    </div>
   </dialog>
 
   <div class="toasts" id="toasts"></div>

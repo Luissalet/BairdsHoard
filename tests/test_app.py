@@ -21,7 +21,8 @@ def client(tmp_path):
 
     cfg = Config(data_dir=tmp_path / "data", port=5232, fake=True, data_dir_configured=True)
     (tmp_path / "data").mkdir()
-    (tmp_path / "data" / "settings.json").write_text('{"media_dir": "%s", "clip_seconds": 3}' % str(tmp_path / "media").replace("\\", "\\\\"))
+    (tmp_path / "data" / "settings.json").write_text(
+        '{"media_dir": "%s", "clip_seconds": 3, "ocr_auto": false, "hotkeys_enabled": false}' % str(tmp_path / "media").replace("\\", "\\\\"))
     app = create_app(cfg)
     with TestClient(app, base_url="http://127.0.0.1:5232", client=("127.0.0.1", 50000)) as c:
         deadline = time.time() + 30

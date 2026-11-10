@@ -15,7 +15,14 @@ Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5
 | **Last seconds** (`B`) | The last 30 s (configurable, up to the memory window) saved as MP4 instantly: the app keeps the recent past in memory, cut on key frames. |
 | **Record** (`R`) | Picture and sound until you stop; starts from the key frame before the click. |
 | **Recent files** | Every file appears at once in the side list: drag the card into a chat, a mail or a folder (inside the Hoard window this is a real file drag), or press **Copy** and paste with Ctrl+V. **Explorer** shows it, **Light** makes a 720p copy for chats with upload limits, **Delete** sends it to the Recycle Bin. |
-| **Assistants** | 16 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`… |
+| **Zone** (`Z`) | Drag a rectangle over the live view and save only that area (screenshot of a zone). Assistants pass `region`. |
+| **Annotate** | Arrows, boxes and text over a screenshot; saved as a new "(anotada)" file, the original is never touched. Optionally send it straight to Faustus. |
+| **Send to Faustus** | Opens a new Faustus chat with the screenshot or clip attached, ready to send. |
+| **Search by text** | Screenshots are read in the background (OCR through the Hub and Kafka); the search bar finds them by the words on screen. |
+| **Watch** | Rules that alert when a zone changes (or stays still) or when text appears/disappears; an alert saves a picture, emits `baird.watch` on the family bus and notifies through the Hub. |
+| **Mini view** (`P`) | Always-on-top Picture-in-Picture window to keep an eye on the other computer. |
+| **Global shortcuts** | Ctrl+Alt+C (screenshot) and Ctrl+Alt+X (last seconds) even when Baird is not focused; configurable in Settings. A small helper registers them with Windows and ends with the app. |
+| **Assistants** | 27 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`… |
 
 Other keys: `M` sound, `F` full screen (double click on the picture also).
 
@@ -50,14 +57,17 @@ Files go to `Videos\Baird` by default (Settings → Folder). Settings, thumbnail
 ## Settings
 
 Capture on/off (off frees the device for other programs), device, audio input (HDMI or line in), screenshot format,
-clip length, memory window (10–600 s), media folder, size and bitrate of light copies.
+clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
+shortcuts on/off and their key combinations (each needs a modifier and must differ).
 
 ## For assistants
 
 `mcp_server.py` is a stdio MCP bridge (it starts the app when it is not running). Tools: `capture_status`,
 `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_stop`, `media_list`, `media_look`,
 `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list`, `settings_get`,
-`settings_set`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
+`settings_set`, `media_search`, `media_ocr`, `ocr_reindex`, `send_to_faustus`, `watch_list`, `watch_add`,
+`watch_update`, `watch_remove`, `watch_check`, `watch_events`, `hotkeys_status`. `snapshot_save` and `screen_look`
+accept a `region`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
 from `data/mcp-token`).
 
 ## HTTP API
@@ -69,6 +79,11 @@ from `data/mcp-token`).
 | `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | the three buttons |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | library, files, thumbnails |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | file actions |
+| `POST /api/snapshot` with `{"region": {x,y,w,h,unit}}` | zone screenshot |
+| `POST /api/media/{name}/annotate` · `/faustus` · `/ocr` | annotated copy (PNG data URL), send to Faustus, read text |
+| `GET /api/search?q=`, `GET /api/ocr/status`, `POST /api/ocr/reindex` | text search over screenshots |
+| `GET/POST /api/watch`, `PUT/DELETE /api/watch/{id}`, `POST /api/watch/{id}/check`, `GET /api/watch/events` | screen watch rules |
+| `GET /api/hotkeys` | global shortcut helper status |
 | `GET/PUT /api/settings`, `GET /api/devices` | settings |
 | `WS /api/live` | live fragmented MP4 (`init` JSON, init segment, fragments; `reset` starts a new stream) |
 
