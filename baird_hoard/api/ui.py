@@ -4,6 +4,7 @@ live WebSocket. Everything the buttons do is also an agent tool (``POST /api/ui/
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from typing import Any, Optional
 from urllib.parse import quote
@@ -27,8 +28,41 @@ class CallBody(BaseModel):
     arguments: Optional[dict[str, Any]] = None
 
 
+class RegionBody(BaseModel):
+    x: float
+    y: float
+    w: float
+    h: float
+    unit: str = "fraction"
+
+
 class SnapshotBody(BaseModel):
     format: Optional[str] = None
+    region: Optional[RegionBody] = None
+
+
+class AnnotateBody(BaseModel):
+    data: str = Field(..., min_length=20, description="The annotated picture as a PNG data URL or plain base64.")
+
+
+class SendBody(BaseModel):
+    message: str = Field("", max_length=4000)
+
+
+class WatchBody(BaseModel):
+    model_config = {"extra": "ignore"}
+    name: Optional[str] = None
+    kind: Optional[str] = None
+    mode: Optional[str] = None
+    region: Optional[RegionBody] = None
+    threshold: Optional[float] = None
+    still_seconds: Optional[float] = None
+    text: Optional[str] = None
+    interval_s: Optional[float] = None
+    cooldown_s: Optional[float] = None
+    notify: Optional[bool] = None
+    save_image: Optional[bool] = None
+    enabled: Optional[bool] = None
 
 
 class ClipBody(BaseModel):
@@ -46,7 +80,83 @@ def status(request: Request):
 
 @router.post("/api/snapshot")
 def snapshot(request: Request, body: SnapshotBody | None = None):
-    return services(request).library.snapshot((body.format if body else None) or None)
+    """The whole picture, or only ``region`` of it (``unit`` fraction = 0..1 of the picture, px = input pixels)."""
+    region = body.region.model_dump() if body and body.region else None
+    return services(request).library.snapshot((body.format if body else None) or None, region)
+
+
+@router.post("/api/media/{name}/annotate")
+def media_annotate(request: Request, name: str, body: AnnotateBody):
+    """Keep the annotated picture the browser drew as a new screenshot; the original stays as it was."""
+    raw = body.data.split(",", 1)[1] if body.data.startswith("data:") and "," in body.data else body.data
+    try:
+        png = base64.b64decode(raw, validate=False)
+    except ValueError:
+        raise BairdError("invalid", "The annotated picture is not valid base64.") from None
+    return services(request).library.save_annotated(name, png)
+
+
+@router.get("/api/search")
+def search(request: Request, q: str = "", limit: int = 50):
+    """Screenshots by the text they show (OCR) or their name."""
+    return tool(request, "media_search", {"query": q, "limit": max(1, min(limit, 200))})
+
+
+@router.get("/api/ocr/status")
+def ocr_status(request: Request):
+    return services(request).ocr.status()
+
+
+@router.post("/api/ocr/reindex")
+def ocr_reindex(request: Request):
+    return tool(request, "ocr_reindex")
+
+
+@router.post("/api/media/{name}/ocr")
+def media_ocr(request: Request, name: str):
+    return tool(request, "media_ocr", {"name": name})
+
+
+@router.post("/api/media/{name}/faustus")
+def media_faustus(request: Request, name: str, body: SendBody | None = None):
+    """New Faustus chat with the file attached; returns the chat's url."""
+    return tool(request, "send_to_faustus", {"name": name, "message": body.message if body else ""})
+
+
+@router.get("/api/watch")
+def watch_list(request: Request):
+    return services(request).watch.list()
+
+
+@router.post("/api/watch")
+def watch_add(request: Request, body: WatchBody):
+    return tool(request, "watch_add", body.model_dump(exclude_unset=True, exclude_none=True))
+
+
+@router.put("/api/watch/{rule_id}")
+def watch_update(request: Request, rule_id: str, body: WatchBody):
+    return tool(request, "watch_update", {"id": rule_id, **body.model_dump(exclude_unset=True, exclude_none=True)})
+
+
+@router.delete("/api/watch/{rule_id}")
+def watch_remove(request: Request, rule_id: str):
+    return tool(request, "watch_remove", {"id": rule_id})
+
+
+@router.post("/api/watch/{rule_id}/check")
+def watch_check(request: Request, rule_id: str):
+    return tool(request, "watch_check", {"id": rule_id})
+
+
+@router.get("/api/watch/events")
+def watch_events(request: Request, limit: int = 20):
+    return {"events": services(request).watch.events(max(1, min(limit, 200)))}
+
+
+@router.get("/api/hotkeys")
+def hotkeys(request: Request):
+    svc = services(request)
+    return svc.hotkeys.status(svc.settings["hotkeys_enabled"])
 
 
 @router.post("/api/clip")

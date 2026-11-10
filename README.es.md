@@ -17,7 +17,18 @@ Forma parte de la familia Hoard (Hoard Hub, Faustus). Funciona en local en Windo
 - **Recientes**: cada archivo aparece al momento en la columna derecha. Arrastra la tarjeta a un chat, un correo o una
   carpeta (en la ventana Hoard es un arrastre de archivo real), o pulsa **Copiar** y pega con Ctrl+V. **Explorador**
   lo muestra, **Ligera** hace una copia 720p para chats con límite de tamaño y **Borrar** lo manda a la papelera.
-- **Asistentes**: 16 herramientas MCP. `screen_look` devuelve la imagen actual para que el asistente vea el otro
+- **Zona** (`Z`): arrastra un rectángulo sobre el directo y guarda solo esa zona; los asistentes pasan `region`.
+- **Anotar**: flechas, recuadros y texto sobre una captura; se guarda como archivo nuevo «(anotada)» y el original no
+  se toca. Se puede mandar directo a Faustus.
+- **Enviar a Faustus**: abre un chat nuevo de Faustus con la captura o el clip adjunto.
+- **Buscar por texto**: las capturas se leen en segundo plano (OCR vía Hub y Kafka) y la barra de búsqueda las
+  encuentra por las palabras de la pantalla.
+- **Vigilar**: reglas que avisan cuando una zona cambia (o se queda quieta) o cuando aparece o desaparece un texto;
+  el aviso guarda una captura, emite `baird.watch` en el bus de la familia y notifica por el Hub.
+- **Vista mini** (`P`): ventana picture-in-picture siempre encima para vigilar el otro ordenador.
+- **Atajos globales**: Ctrl+Alt+C (captura) y Ctrl+Alt+X (últimos segundos) aunque Baird no tenga el foco; se cambian
+  en Ajustes. Un pequeño ayudante los registra en Windows y termina con la app.
+- **Asistentes**: 27 herramientas MCP. `screen_look` devuelve la imagen actual para que el asistente vea el otro
   ordenador; también clip, grabación, lista, copiar al portapapeles…
 
 Otras teclas: `M` sonido, `F` pantalla completa (o doble clic en la imagen).
@@ -42,6 +53,7 @@ Los archivos van a `Vídeos\Baird` (se cambia en Ajustes → Carpeta).
 ## Ajustes
 
 Captura activada o no (desactivada libera la capturadora para otros programas), capturadora, audio (HDMI o entrada de
-línea), formato de captura, duración del clip, memoria (10–600 s), carpeta, tamaño y bitrate de las copias ligeras.
+línea), formato de captura, duración del clip, memoria (10–600 s), carpeta, tamaño y bitrate de las copias ligeras, OCR automático y atajos globales (activarlos y la combinación de cada uno,
+con un modificador y distintas entre sí).
 
 Licencia MIT.
