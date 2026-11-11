@@ -80,5 +80,6 @@
       "BAIRD_DATA_DIR"
     ]
   },
-  "notes": "screen_look returns the current picture of the other computer as an image (and keeps it as a screenshot unless save=false); media_look shows a saved file. clip_save copies the last seconds from memory without re-encoding; record_start / record_stop record picture and sound. Files live in the media folder (default Videos\\Baird); media_list gives their paths. The device needs the AVerMedia GL310 driver (AVer835_x64.inf, WHQL) and nothing else from AVerMedia: the app reads the hardware H.264 encoder directly. Pictures of the other computer may show private information."
+  "notes": "screen_look returns the current picture of the other computer as an image (and keeps it as a screenshot unless save=false); media_look shows a saved file. clip_save copies the last seconds from memory without re-encoding; record_start / record_stop record picture and sound. Files live in the media folder (default Videos\\Baird); media_list gives their paths. The device needs the AVerMedia GL310 driver (AVer835_x64.inf, WHQL) and nothing else from AVerMedia: the app reads the hardware H.264 encoder directly. Pictures of the other computer may show private information.",
+  "skills": {"slugs": ["screen-capture-evidence", "systematic-debugging"], "limit": 2}
 }
