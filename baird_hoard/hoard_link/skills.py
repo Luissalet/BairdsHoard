@@ -473,6 +473,245 @@ def auto(app: str, data_dir: Any = None) -> Optional[Shelf]:
     return Shelf(app, where, wants)
 
 
+_BRIDGE_TOOLS = ("skills_list", "skill_read", "skills_library", "skills_assign")
+
+
+def attach(server: Any, app: str, root: Any = None, data_dir: Any = None) -> Optional[Shelf]:
+    """Give an MCP server an app wrote by hand (``mcp`` 1.x ``Server`` / ``FastMCP``, 2.x ``Server`` / ``MCPServer``) the app's
+    shelf: the skills are named at the end of its instructions, listed and read with ``skills_list`` / ``skill_read`` /
+    ``skills_library`` / ``skills_assign`` (answered here) and offered as prompts called ``skill-<slug>``. One line anywhere
+    after the server object exists: ``skills.attach(server, "myapp", root=__file__)``. ``root`` is the file or folder the
+    manifest is beside (or up to two folders above); the copies are read from ``data_dir``, else ``$<APP>_DATA_DIR``, else the
+    ``data`` folder beside the manifest. It only reads the copy (the hub or the app keeps it). Returns the shelf, or None when
+    there is nothing to hand out (no manifest, an empty shelf, under pytest, ``HOARD_SKILLS=0``). Never raises."""
+    if _off():
+        return None                                        # an app's own tests see the app, not this computer's library
+    try:
+        return _attach(server, app, root, data_dir)
+    except Exception as error:  # noqa: BLE001 - a bridge without skills is still a bridge
+        log.debug("skills not attached to %s's MCP server: %s", app, error)
+        return None
+
+
+def _off() -> bool:
+    return "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or os.environ.get("HOARD_SKILLS", "1").strip().lower() in ("0", "false", "no", "off")
+
+
+def _bridge_shelf(app: str, root: Any, data_dir: Any) -> Optional[Shelf]:
+    """The shelf as a bridge reads it: the copy beside the app's data, never the library."""
+    here = Path(root).resolve() if root else Path.cwd()
+    if here.is_file() or here.suffix:
+        here = here.parent
+    manifest = next((p / "faustus-plugin.json" for p in (here, *list(here.parents)[:2]) if (p / "faustus-plugin.json").is_file()), None)
+    if manifest is None:
+        return None
+    where = data_dir or os.environ.get(f"{re.sub(r'[^A-Za-z0-9]+', '_', app).upper()}_DATA_DIR") or manifest.parent / "data"
+    shelf = Shelf(app, where, wants_of(manifest), max_age_s=float("inf"))
+    shelf._checked = time.monotonic()                      # never looks the library up from a bridge
+    return shelf
+
+
+def _as_prompt(shelf: Shelf, app: str, name: Any) -> dict[str, Any]:
+    row = shelf.read(str(name))
+    text = str(row["text"])
+    if text.startswith("---") and "\n---" in text[3:]:
+        text = text[text.index("\n---", 3) + 4:].lstrip("\n")                                    # the front matter is for the library
+    return {"description": str(row.get("name") or name), "messages": [
+        {"role": "user", "content": {"type": "text", "text": f"Follow this procedure with the tools of {app}.\n\n{text}"}}]}
+
+
+class RawBridge:
+    """The shelf for a bridge that speaks MCP's JSON-RPC by hand (see :func:`raw`)."""
+
+    def __init__(self, app: str, shelf: Optional[Shelf]) -> None:
+        self.app, self.shelf = app, shelf
+
+    def _rows(self) -> list[dict[str, Any]]:
+        try:
+            return self.shelf.list(refresh=False) if self.shelf is not None else []
+        except Exception:  # noqa: BLE001
+            return []
+
+    def answer(self, method: Any, params: Any = None) -> Optional[dict[str, Any]]:
+        """The result of a request the shelf answers itself (a skill tool's ``tools/call``, ``prompts/list``,
+        ``prompts/get``); None for everything else: the bridge goes on as it always did."""
+        params = params if isinstance(params, Mapping) else {}
+        if not self._rows():
+            return None
+        if method == "tools/call" and params.get("name") in _BRIDGE_TOOLS:
+            try:
+                body, failed = self.shelf.call(str(params["name"]), params.get("arguments") or {}), False       # type: ignore[union-attr]
+            except (KeyError, ValueError) as error:
+                body, failed = {"error": str(error.args[0]) if error.args else str(error), "code": "not_found" if isinstance(error, KeyError) else "invalid"}, True
+            return {"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": failed}
+        if method == "prompts/list":
+            return {"prompts": [{"name": f"skill-{s['slug']}", "description": str(s.get("description") or "")[:900]} for s in self._rows()]}
+        if method == "prompts/get":
+            return _as_prompt(self.shelf, self.app, params.get("name"))                                         # type: ignore[arg-type]
+        return None
+
+    def extend(self, method: Any, result: Any) -> Any:
+        """``result`` of ``initialize`` (the skills named in the instructions, prompts offered) or ``tools/list`` (the skill
+        tools added); any other result comes back as it is."""
+        rows = self._rows()
+        if not rows or not isinstance(result, Mapping):
+            return result
+        if method == "initialize":
+            told = self.shelf.instructions(rows)                                                                # type: ignore[union-attr]
+            return {**result, "capabilities": {**(result.get("capabilities") or {}), "prompts": {}},
+                    "instructions": "\n\n".join(x for x in (result.get("instructions"), told) if x)}
+        if method == "tools/list":
+            tools = list(result.get("tools") or [])
+            if any(isinstance(t, Mapping) and t.get("name") == "skills_list" for t in tools):
+                return result
+            return {**result, "tools": tools + [e for e in self.shelf.catalog() if e["name"] in _BRIDGE_TOOLS]}  # type: ignore[union-attr]
+        return result
+
+
+def raw(app: str, root: Any = None, data_dir: Any = None) -> RawBridge:
+    """For a bridge that answers MCP's JSON-RPC by hand: ``shelf = skills.raw("myapp", root=__file__)``, then
+    ``own = shelf.answer(method, params)`` before its own dispatch (not None = that is the result) and
+    ``shelf.extend(method, result)`` on what it returns. With nothing to hand out both leave everything as it was."""
+    try:
+        return RawBridge(app, None if _off() else _bridge_shelf(app, root, data_dir))
+    except Exception as error:  # noqa: BLE001
+        log.debug("no skills for %s's bridge: %s", app, error)
+        return RawBridge(app, None)
+
+
+def _attach(server: Any, app: str, root: Any, data_dir: Any) -> Optional[Shelf]:
+    shelf = _bridge_shelf(app, root, data_dir)
+    if shelf is None or not shelf.list(refresh=False):
+        return None
+
+    import asyncio
+
+    from mcp import types
+
+    low = getattr(server, "_mcp_server", None) or getattr(server, "_lowlevel_server", None) or server
+    state = {"local": True}
+
+    def extra_tools() -> list[Any]:
+        return [types.Tool.model_validate({"name": e["name"], "description": e["description"], "inputSchema": e["inputSchema"], "annotations": e.get("annotations") or {}})
+                for e in shelf.catalog() if e["name"] in _BRIDGE_TOOLS]
+
+    def with_skills(tools: list[Any]) -> list[Any]:
+        state["local"] = not any(getattr(t, "name", "") == "skills_list" for t in tools)       # an app that hands them out itself is left alone
+        return [*tools, *extra_tools()] if state["local"] and shelf.list(refresh=False) else tools
+
+    def mine(name: Any) -> bool:
+        return state["local"] and name in _BRIDGE_TOOLS
+
+    async def answer(name: str, arguments: Any) -> Any:
+        try:
+            body, failed = await asyncio.to_thread(shelf.call, name, dict(arguments or {})), False
+        except (KeyError, ValueError) as error:
+            body, failed = {"error": str(error.args[0]) if error.args else str(error), "code": "not_found" if isinstance(error, KeyError) else "invalid"}, True
+        return types.CallToolResult.model_validate({"content": [{"type": "text", "text": json.dumps(body, ensure_ascii=False)}], "isError": failed})
+
+    def prompts() -> list[Any]:
+        return [types.Prompt.model_validate({"name": f"skill-{s['slug']}", "description": str(s.get("description") or "")[:900]}) for s in shelf.list(refresh=False)]
+
+    def prompt(name: Any) -> Any:
+        return types.GetPromptResult.model_validate(_as_prompt(shelf, app, name))
+
+    def is_skill(name: Any) -> bool:
+        return str(name or "").startswith("skill-")
+
+    class Lazy(dict):  # type: ignore[type-arg]
+        """The server's handler table: what the app registers (now or later) is looked up through ``wrap``."""
+
+        def __init__(self, base: Any, wrap: Callable[[Any, Any], Any], added: tuple[Any, ...]) -> None:
+            super().__init__(base)
+            self._wrap, self._added = wrap, added
+
+        def __contains__(self, key: Any) -> bool:
+            return key in self._added or dict.__contains__(self, key)
+
+        def __getitem__(self, key: Any) -> Any:
+            found = self._wrap(key, dict.get(self, key))
+            if found is None:
+                raise KeyError(key)
+            return found
+
+        def get(self, key: Any, default: Any = None) -> Any:
+            found = self._wrap(key, dict.get(self, key))
+            return default if found is None else found
+
+    if isinstance(getattr(low, "request_handlers", None), dict):                                  # mcp 1.x: handlers by request class
+        def wrap1(key: Any, handler: Any) -> Any:
+            if key is types.ListToolsRequest and handler is not None:
+                async def list_tools(request: Any) -> Any:
+                    result = await handler(request)
+                    inner = getattr(result, "root", result)
+                    if getattr(inner, "nextCursor", None):
+                        return result
+                    return types.ServerResult(types.ListToolsResult(tools=with_skills(list(inner.tools))))
+                return list_tools
+            if key is types.CallToolRequest and handler is not None:
+                async def call_tool(request: Any) -> Any:
+                    if mine(request.params.name):
+                        return types.ServerResult(await answer(request.params.name, request.params.arguments))
+                    return await handler(request)
+                return call_tool
+            if key is types.ListPromptsRequest:
+                async def list_prompts(request: Any) -> Any:
+                    inner = getattr(await handler(request), "root", None) if handler is not None else None
+                    return types.ServerResult(types.ListPromptsResult(prompts=[*(inner.prompts if inner is not None else []), *prompts()]))
+                return list_prompts
+            if key is types.GetPromptRequest:
+                async def get_prompt(request: Any) -> Any:
+                    if handler is not None and not is_skill(request.params.name):
+                        return await handler(request)
+                    return types.ServerResult(prompt(request.params.name))
+                return get_prompt
+            return handler
+
+        low.request_handlers = Lazy(low.request_handlers, wrap1, (types.ListPromptsRequest, types.GetPromptRequest))
+    elif isinstance(getattr(low, "_request_handlers", None), dict):                               # mcp 2.x: entries by method name
+        table = low._request_handlers
+        entry_type = type(next(iter(table.values())))
+
+        def entry(params_type: Any, handler: Any) -> Any:
+            return entry_type(params_type, handler)
+
+        def wrap2(key: Any, found: Any) -> Any:
+            handler = getattr(found, "handler", None)
+            if key == "tools/list" and found is not None:
+                async def list_tools(ctx: Any, params: Any) -> Any:
+                    result = await handler(ctx, params)
+                    if getattr(result, "next_cursor", None):
+                        return result
+                    return result.model_copy(update={"tools": with_skills(list(result.tools))})
+                return entry(found.params_type, list_tools)
+            if key == "tools/call" and found is not None:
+                async def call_tool(ctx: Any, params: Any) -> Any:
+                    if mine(params.name):
+                        return await answer(params.name, params.arguments)
+                    return await handler(ctx, params)
+                return entry(found.params_type, call_tool)
+            if key == "prompts/list":
+                async def list_prompts(ctx: Any, params: Any) -> Any:
+                    inner = await handler(ctx, params) if handler is not None else None
+                    return types.ListPromptsResult(prompts=[*(inner.prompts if inner is not None else []), *prompts()])
+                return entry(found.params_type if found is not None else types.PaginatedRequestParams, list_prompts)
+            if key == "prompts/get":
+                async def get_prompt(ctx: Any, params: Any) -> Any:
+                    if handler is not None and not is_skill(params.name):
+                        return await handler(ctx, params)
+                    return prompt(params.name)
+                return entry(found.params_type if found is not None else types.GetPromptRequestParams, get_prompt)
+            return found
+
+        low._request_handlers = Lazy(table, wrap2, ("prompts/list", "prompts/get"))
+    else:
+        return None
+    told = shelf.instructions(shelf.list(refresh=False))
+    if told and "Skills." not in str(getattr(low, "instructions", "") or ""):
+        low.instructions = "\n\n".join(x for x in (getattr(low, "instructions", None), told) if x)
+    return shelf
+
+
 def mount(router: Any, shelf: Shelf, prefix: str = "/skills", title: str = "") -> Any:
     """The skills page of an app and what it calls, added to ``router``: ``GET {prefix}`` (state; ``?q=`` filters the
     library), ``GET {prefix}/page`` (the page), ``GET {prefix}/read/{slug}``, ``POST {prefix}/assign {slug, on}``,
