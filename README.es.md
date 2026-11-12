@@ -34,14 +34,18 @@ Forma parte de la familia Hoard (Hoard Hub, Faustus). Funciona en local en Windo
 Otras teclas: `M` sonido, `F` pantalla completa (o doble clic en la imagen).
 
 Si el driver de la capturadora deja de responder (puede pasar cuando el otro ordenador entra en reposo), el estado
-dice **La capturadora no responde**: desenchufa su USB, espera cinco segundos y vuelve a enchufarlo; Baird vuelve a
-arrancar solo.
+dice **La capturadora no responde**: desenchufa su USB, espera cinco segundos y vuelve a enchufarlo; Baird vuelve a intentarlo si hay demanda, según la espera y el límite de aperturas.
 
 ## Dispositivo
 
 AVerMedia Live Gamer Portable Lite (GL310, USB `07CA:C835`); la Live Gamer Portable (C875) va por el mismo camino.
 Solo hace falta el driver (`AVer835_x64.inf` v3.7.64.39, firmado WHQL, del paquete `GL310_3.7.x.39.zip` de
 AVerMedia). No se usa ninguna aplicación del fabricante. Detalles en [docs/DEVICE.md](docs/DEVICE.md).
+
+Baird abre la capturadora al mostrar el directo, grabar, activar una regla o pedir una imagen con una herramienta.
+La libera tras diez segundos sin uso. Si falta señal, el directo muestra **Reintentar ahora** y avisa al alcanzar
+el límite de aperturas. En Ajustes se puede activar **Captura siempre activa**. El Hub omite Baird al arrancar y
+en **Arrancar todo**. Los [detalles del dispositivo](docs/DEVICE.md) recogen el incidente del 12 de noviembre.
 
 ## Arrancar
 

@@ -22,7 +22,7 @@ def client(tmp_path):
     cfg = Config(data_dir=tmp_path / "data", port=5232, fake=True, data_dir_configured=True)
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "settings.json").write_text(
-        '{"media_dir": "%s", "clip_seconds": 3, "ocr_auto": false, "hotkeys_enabled": false}' % str(tmp_path / "media").replace("\\", "\\\\"))
+        '{"media_dir": "%s", "clip_seconds": 3, "capture_always_on": true, "ocr_auto": false, "hotkeys_enabled": false}' % str(tmp_path / "media").replace("\\", "\\\\"))
     app = create_app(cfg)
     with TestClient(app, base_url="http://127.0.0.1:5232", client=("127.0.0.1", 50000)) as c:
         deadline = time.time() + 30
@@ -104,3 +104,52 @@ def test_settings_validation(client):
     assert client.put("/api/settings", json={"snapshot_format": "gif"}).status_code == 400
     s = client.put("/api/settings", json={"clip_seconds": 5}).json()
     assert s["clip_seconds"] == 5
+
+
+def test_background_start_leaves_capture_idle_until_a_consumer_requests_it(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from baird_hoard import capture
+    from baird_hoard.config import Config
+    from baird_hoard.main import create_app
+    from baird_hoard.services import Services
+
+    monkeypatch.setattr(capture, "IDLE_GRACE_S", 0.4)
+    monkeypatch.setattr(capture, "ensure_helper", lambda: pytest.fail("native helper requested in demo"))
+    cfg = Config(data_dir=tmp_path / "data", port=5232, fake=True, data_dir_configured=True)
+    svc = Services(cfg)
+    svc.settings.update({"media_dir": str(tmp_path / "media"), "ocr_auto": False, "hotkeys_enabled": False})
+    with TestClient(create_app(cfg, svc), base_url="http://127.0.0.1:5232", client=("127.0.0.1", 50000)) as c:
+        assert c.get("/api/status").json()["capture"]["state"] == "idle"
+        assert c.get("/api/health").json()["capture"] == "idle"
+        assert c.get("/api/settings").json()["capture_always_on"] is False
+        assert svc.engine._thread is None and not svc.engine._budget_path.exists()
+
+        def wait_for_state(state):
+            deadline = time.monotonic() + 8
+            while c.get("/api/status").json()["capture"]["state"] != state:
+                assert time.monotonic() < deadline, state
+                time.sleep(0.05)
+
+        with c.websocket_connect("ws://127.0.0.1:5232/api/live") as ws:
+            assert ws.receive_json()["type"] == "reset"
+            wait_for_state("running")
+        wait_for_state("idle")
+
+        shot = c.post("/api/snapshot")
+        assert shot.is_success, shot.text
+        wait_for_state("idle")
+
+        rec = c.post("/api/record/start")
+        assert rec.is_success, rec.text
+        time.sleep(0.55)
+        assert c.get("/api/status").json()["capture"]["state"] == "running"
+        assert c.post("/api/record/stop").is_success
+        wait_for_state("idle")
+
+        rule = c.post("/api/watch", json={"enabled": False, "notify": False, "save_image": False}).json()
+        assert c.get("/api/status").json()["capture"]["state"] == "idle"
+        assert c.put(f"/api/watch/{rule['id']}", json={"enabled": True}).is_success
+        wait_for_state("running")
+        assert c.put(f"/api/watch/{rule['id']}", json={"enabled": False}).is_success
+        wait_for_state("idle")

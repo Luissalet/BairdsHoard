@@ -198,15 +198,17 @@ class Library:
     def snapshot(self, fmt: Optional[str] = None, region: Optional[dict[str, Any]] = None, *,
                  prefix: Optional[str] = None, origin: Optional[str] = None) -> dict[str, Any]:
         """Save the current picture (or only ``region`` of it); returns its description."""
-        self.engine.require_picture()
         ff = self._need_ffmpeg()
         fmt = (fmt or self.settings["snapshot_format"]).lower()
         if fmt not in ("png", "jpg"):
             raise BairdError("invalid", "fmt must be png or jpg")
-        region = parse_region(region, self.input_size())
-        data, frames = self.buffer.latest()
-        if not data:
-            raise BairdError("no_signal", "No picture has arrived yet.", "Wait a second and try again.")
+        with self.engine.request():
+            self.engine.wait_for_picture()
+            inp = self.engine.snapshot().get("input") or {}
+            region = parse_region(region, self.input_size())
+            data, frames = self.buffer.latest()
+            if not data:
+                raise BairdError("no_signal", "No picture has arrived yet.", "Wait a second and try again.")
         out = self._new_path(prefix or ("Captura zona" if region else "Captura"), "." + fmt)
         enc = ["-c:v", "png"] if fmt == "png" else ["-q:v", "2"]
         last_err = ""
@@ -216,7 +218,6 @@ class Library:
                     "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(out)]
             proc = self._run(args, data=data, timeout=20)
             if proc.returncode == 0 and out.is_file() and out.stat().st_size > 0:
-                inp = self.engine.snapshot().get("input") or {}
                 size = self._probe(out) if region else {"width": inp.get("width"), "height": inp.get("height")}
                 desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
                                       height=size.get("height"), taken=time.time(), region=region)
@@ -289,14 +290,15 @@ class Library:
 
     def clip(self, seconds: Optional[float] = None) -> dict[str, Any]:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
-        self.engine.require_picture()
-        ff = self._need_ffmpeg()
-        secs = float(seconds or self.settings["clip_seconds"])
-        kept = self.buffer.seconds_kept()
-        if secs > self.settings["buffer_seconds"]:
-            raise BairdError("invalid", f"At most {self.settings['buffer_seconds']} s are kept in memory.",
-                             "Raise buffer_seconds in the settings for longer clips, or record.")
-        parts = self.buffer.since(secs)
+        with self.engine.request():
+            self.engine.wait_for_picture()
+            ff = self._need_ffmpeg()
+            secs = float(seconds or self.settings["clip_seconds"])
+            kept = self.buffer.seconds_kept()
+            if secs > self.settings["buffer_seconds"]:
+                raise BairdError("invalid", f"At most {self.settings['buffer_seconds']} s are kept in memory.",
+                                 "Raise buffer_seconds in the settings for longer clips, or record.")
+            parts = self.buffer.since(secs)
         if not parts:
             raise BairdError("no_signal", "Nothing is in memory yet.")
         tmp = self.config.work_dir / f"clip-{uuid.uuid4().hex[:8]}.ts"
@@ -451,22 +453,25 @@ class Recorder:
             return out
 
     def start(self) -> dict[str, Any]:
-        with self._lock:
-            if self.state == "recording":
-                raise BairdError("busy", "Already recording.", "record_stop ends it.")
-            if self.state == "finishing":
-                raise BairdError("busy", "The previous recording is still being written; try again in a moment.")
-            self.lib.engine.require_picture()
-            self.lib._need_ffmpeg()
-            head, self._from = self.lib.buffer.tail()
-            self._tmp = self.lib.config.work_dir / f"rec-{uuid.uuid4().hex[:8]}.ts"
-            self._target = self.lib._new_path("Grabación", ".mp4")
-            self._file = open(self._tmp, "wb")
-            self._file.write(head)
-            self._bytes = len(head)
-            self._started = time.time()
-            self.state, self.message = "recording", ""
-            return self.status()
+        with self.lib.engine.request():
+            self.lib.engine.wait_for_picture()
+            with self._lock:
+                if self.state == "recording":
+                    raise BairdError("busy", "Already recording.", "record_stop ends it.")
+                if self.state == "finishing":
+                    raise BairdError("busy", "The previous recording is still being written; try again in a moment.")
+                self.lib.engine.require_picture()
+                self.lib._need_ffmpeg()
+                head, self._from = self.lib.buffer.tail()
+                self._tmp = self.lib.config.work_dir / f"rec-{uuid.uuid4().hex[:8]}.ts"
+                self._target = self.lib._new_path("Grabación", ".mp4")
+                self._file = open(self._tmp, "wb")
+                self._file.write(head)
+                self._bytes = len(head)
+                self._started = time.time()
+                self.lib.engine.set_demand("recording", True)
+                self.state, self.message = "recording", ""
+                return self.status()
 
     def _on_data(self, aligned: bytes, starts: list[int], end_total: int) -> None:
         with self._lock:
@@ -499,6 +504,7 @@ class Recorder:
         if f:
             f.close()
         self.state = "finishing"
+        self.lib.engine.set_demand("recording", False)
         seconds = round(time.time() - self._started, 1)
 
         def work() -> None:

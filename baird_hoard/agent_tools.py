@@ -123,6 +123,7 @@ class SettingsArgs(BaseModel):
     snapshot_format: Optional[Literal["png", "jpg"]] = None
     audio_input: Optional[Literal["hdmi", "line"]] = None
     capture_enabled: Optional[bool] = None
+    capture_always_on: Optional[bool] = Field(None, description="Keep capture on without demand. Repeated opens of the legacy driver contributed to a Windows crash.")
     media_dir: Optional[str] = Field(None, max_length=500, description="Folder for the files; empty string = default.")
     device: Optional[str] = Field(None, max_length=80)
     light_height: Optional[int] = Field(None, ge=240, le=1080)
@@ -174,10 +175,17 @@ def _settings_set(svc: Services, a: SettingsArgs) -> dict[str, Any]:
     return svc.apply_settings(changes)
 
 
+def _watch_check(svc: Services, a: WatchIdArgs) -> dict[str, Any]:
+    with svc.engine.request():
+        return svc.watch.check(a.id, picture=svc.engine.wait_for_picture)
+
+
 TOOLS: list[Tool] = [
     Tool("capture_status", _d("Whether the other computer's picture is coming in, its resolution and what is being recorded.",
                               synonyms="estado, señal, capturadora"),
          Empty, ann(read_only=True), lambda s, a: s.status()),
+    Tool("capture_retry", _d("Retry a failed capture now while there is demand, subject to the hourly limit."),
+         Empty, ann(), lambda s, a: s.engine.retry_now()),
     Tool("screen_look", _d("See the other computer's screen now: returns the current picture as an image.",
                            "Saved as a screenshot unless save=false.", "ver pantalla, captura, qué hay en el otro ordenador"),
          LookArgs, ann(), _look, timeout_s=30, capped=False),
@@ -234,7 +242,7 @@ TOOLS: list[Tool] = [
     Tool("watch_remove", _d("Delete a watch rule."), WatchIdArgs, ann(destructive=True), lambda s, a: s.watch.remove(a.id)),
     Tool("watch_check", _d("Look once now at a rule's zone and say what it sees (it fires the rule if the condition is met).",
                            "The first look of a rule only records the starting picture."),
-         WatchIdArgs, ann(), lambda s, a: s.watch.check(a.id), timeout_s=150),
+         WatchIdArgs, ann(), _watch_check, timeout_s=150),
     Tool("watch_events", _d("The latest alerts the watch rules fired, newest first."), WatchEventsArgs, ann(read_only=True),
          lambda s, a: {"events": s.watch.events(a.limit)}),
     Tool("hotkeys_status", _d("The global shortcuts for screenshot and clip: which combinations are registered and the last press.",
@@ -244,7 +252,7 @@ TOOLS: list[Tool] = [
          lambda s, a: {"jobs": s.library.jobs()}),
     Tool("settings_get", _d("Current settings (clip length, memory, folder, screenshot format, audio input)."), Empty,
          ann(read_only=True), lambda s, a: s.settings.get()),
-    Tool("settings_set", _d("Change settings; changing device, audio input or capture on/off restarts capture."),
+    Tool("settings_set", _d("Change capture settings. Capture runs on demand unless capture_always_on is enabled."),
          SettingsArgs, ann(idempotent=True), _settings_set),
 ]
 
