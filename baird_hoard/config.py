@@ -30,6 +30,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "buffer_seconds": 120,       # how much of the past is kept in memory (the longest possible clip)
     "snapshot_format": "png",    # png (exact pixels) or jpg (smaller)
     "audio_input": "hdmi",       # hdmi (the sound that comes with the picture) or line (the 3.5 mm input)
+    "capture_always_on": False,  # opt in to capture even without viewers, recordings or rules
     "capture_enabled": True,     # off frees the device for other programs
     "light_height": 720,         # "light copy" of a video: height in pixels
     "light_kbps": 2500,          # "light copy" of a video: video bitrate
@@ -50,7 +51,7 @@ class Config:
     allowed_hosts: tuple[str, ...] = ()
     data_dir_configured: bool = False
     fake: bool = False              # demo/tests: a synthetic source instead of the device
-    background: bool = True         # the capture thread; tests switch it off
+    background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
 
     @property
     def paths(self) -> AppPaths:
@@ -145,6 +146,7 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     if data["audio_input"] not in AUDIO_INPUTS:
         raise ValueError("audio_input must be hdmi or line")
     data["capture_enabled"] = bool(data["capture_enabled"])
+    data["capture_always_on"] = data["capture_always_on"] is True
     data["light_height"] = int(min(max(int(data["light_height"]), 240), 1080))
     data["light_kbps"] = int(min(max(int(data["light_kbps"]), 300), 20000))
     data["ocr_auto"] = bool(data["ocr_auto"])

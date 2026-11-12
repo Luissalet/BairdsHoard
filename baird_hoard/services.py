@@ -42,13 +42,14 @@ class Services:
         self.library.on_rename = self.ocr.renamed
         self.library.on_delete = self.ocr.deleted
         self.watch = WatchEngine(config.data_dir / "watch.json", self.library, self.engine, config.work_dir,
-                                 ocr_fn=lambda path: self.ocr.ocr_fn(path), notify_fn=self._notify, emit_fn=family.emit)
+                                 ocr_fn=lambda path: self.ocr.ocr_fn(path), notify_fn=self._notify, emit_fn=family.emit,
+                                 on_demand=lambda active: self.engine.set_demand("watch", active))
         self.hotkeys = HotkeyHelper(config.data_dir / "hotkeys-status.json", config.port)
         self.started = time.time()
 
     def start(self) -> None:
         if self.config.background:
-            self.engine.start()
+            self.engine.settings_changed()
             self.ocr.start()
             self.watch.start()
             self._start_hotkeys()
@@ -76,15 +77,16 @@ class Services:
         state = snap.get("state", "")
         previous, self._last_state = self._last_state, state
         self.library.recorder.on_capture_state(state)
-        if state == "running" and previous != "running":
-            self.live.restart()
+        if state != previous and (state == "running" or previous == "running"):
+            self.live.source_changed(state == "running")
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         before = self.settings.get()
         after = self.settings.update(changes)
         self.buffer.keep_seconds = after["buffer_seconds"]
-        if any(before[k] != after[k] for k in ("device", "audio_input", "capture_enabled")):
-            self.engine.restart()
+        reopen = any(before[k] != after[k] for k in ("device", "audio_input"))
+        if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):
+            self.engine.settings_changed(reopen=reopen)
         if self.config.background:
             if any(before[k] != after[k] for k in HOTKEY_KEYS):
                 self._start_hotkeys()

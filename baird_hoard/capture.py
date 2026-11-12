@@ -1,25 +1,21 @@
-"""The capture engine: runs ``bairdcap.exe`` (or, for demos and tests, an ffmpeg test pattern), reads the transport
-stream from its stdout, keeps the recent past in a :class:`TsBuffer` and hands every chunk to the listeners (the
-live view and the recorder). It restarts by itself after an unplug or a lost signal and frees the device when
-capture is switched off.
-
-A helper that does not leave after an error, or cannot be killed because it is stuck inside the driver, puts the
-engine in the ``stuck`` state: the device needs to be unplugged and plugged back in. The engine notices the replug
-(or the stuck helper going away) and starts again by itself; it never waits on a helper without a time limit."""
+"""Demand-driven capture from the native helper or a synthetic ffmpeg source."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .config import Settings
 from .errors import BairdError
-from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids, kill_pids, list_devices
+from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids
 from .tsbuf import TsBuffer
 
 log = logging.getLogger("baird.capture")
@@ -31,7 +27,10 @@ START_LIMIT_S = 30.0     # a helper that has produced nothing after this long is
 SILENCE_LIMIT_S = 20.0   # the helper's own watchdog fires at 8 s; this is the backstop
 EXIT_GRACE_S = 4.0       # time a helper gets to leave after reporting an error
 KILL_GRACE_S = 6.0       # time a killed helper gets to disappear before the device counts as stuck
-STUCK_RETRY_S = 60.0     # while stuck, try the device again this often even without a replug
+IDLE_GRACE_S = 10.0
+RETRY_DELAYS_S = (15.0, 60.0, 300.0, 900.0)
+OPEN_LIMIT = 12
+OPEN_WINDOW_S = 3600.0
 
 
 class CaptureEngine:
@@ -46,14 +45,21 @@ class CaptureEngine:
         self._lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
+        self._changed = threading.Condition(self._lock)
+        self._demands: set[object] = set()
+        self._idle_until = 0.0
+        self._retry_at = 0.0
+        self._retry_step = 0
+        self._limit_until = 0.0
+        self._opening = False
+        self._restart = threading.Event()
         self._stop = threading.Event()
+        self._budget_path = Path(settings.path).with_name("capture-opens.sqlite3")
         self._wake = threading.Event()
         self._fatal: Optional[tuple[str, str, float]] = None  # code, message, time of the helper's last error
         self._fails = 0
         self._stuck_pids: set[int] = set()
-        self._stuck_since = 0.0
-        self._saw_unplug = False
-        self.state: dict[str, Any] = {"state": "off", "message": "", "device": "", "encoder": "", "input": None,
+        self.state: dict[str, Any] = {"state": "idle", "message": "", "device": "", "encoder": "", "input": None,
                                       "kbps": 0, "since": None, "restarts": 0, "audio": False, "hint": ""}
 
     # ------------------------------------------------------------------ listeners
@@ -69,46 +75,99 @@ class CaptureEngine:
 
     # ------------------------------------------------------------------ lifecycle
 
-    def start(self) -> None:
-        if self._thread and self._thread.is_alive():
-            return
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="baird-capture", daemon=True)
-        self._thread.start()
+    def _start(self) -> None:
+        if not self._stop.is_set() and not (self._thread and self._thread.is_alive()):
+            self._thread = threading.Thread(target=self._loop, name="baird-capture", daemon=True)
+            self._thread.start()
+
+    def _wanted(self) -> bool:
+        return self.settings["capture_enabled"] and bool(self._demands or self.settings["capture_always_on"])
+
+    def set_demand(self, source: object, active: bool) -> None:
+        with self._lock:
+            if active:
+                self._demands.add(source)
+            else:
+                if source in self._demands and len(self._demands) == 1:
+                    self._idle_until = time.monotonic() + IDLE_GRACE_S
+                self._demands.discard(source)
+            if self._wanted():
+                self._start()
+            self._wake.set()
+
+    @contextmanager
+    def request(self):
+        source = object()
+        self.set_demand(source, True)
+        try:
+            yield
+        finally:
+            self.set_demand(source, False)
 
     def stop(self) -> None:
         self._stop.set()
         self._wake.set()
-        self._kill()
+        with self._changed:
+            self._changed.notify_all()
         if self._thread:
             self._thread.join(timeout=8)
 
-    def restart(self) -> None:
-        """Apply new settings: stop the helper; the loop starts it again (or stays off)."""
-        self._kill()
-        self._wake.set()
+    def settings_changed(self, reopen: bool = False) -> None:
+        with self._lock:
+            if reopen and (self._opening or self._proc is not None):
+                self._restart.set()
+            if self._wanted():
+                self._start()
+            self._wake.set()
+            self._changed.notify_all()
+
+    def retry_now(self) -> dict[str, Any]:
+        with self._lock:
+            if self._wanted() and not self._opening and self._proc is None and time.monotonic() >= self._limit_until:
+                self._retry_at = 0.0
+                self._wake.set()
+        return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:
             out = dict(self.state)
+            out["retry_in_s"] = round(max(0.0, max(self._retry_at, self._limit_until) - time.monotonic()), 1)
+            if not self.settings["capture_enabled"]:
+                out.update(state="off", message="Capture is off.")
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
+
+    def wait_for_picture(self) -> None:
+        """Wait for a pending opening, for up to twelve seconds."""
+        deadline = time.monotonic() + 12
+        with self._changed:
+            while self._wanted() and not self._stop.is_set():
+                try:
+                    self.require_picture()
+                    return
+                except BairdError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or (not self._opening and self.snapshot()["retry_in_s"] > 0):
+                        raise
+                    self._changed.wait(remaining)
+        self.require_picture()
 
     def require_picture(self) -> None:
         st = self.snapshot()
         if st["state"] != "running" or st["age_s"] is None or st["age_s"] > 3:
             hint = {"off": "Turn capture on.", "no_device": "Plug in the capture device (AVerMedia GL310).",
-                    "stuck": STUCK_HINT,
+                    "stuck": STUCK_HINT, "rate_limited": "Wait for the hourly opening limit to reset.",
                     "no_signal": "Check that the other computer is on and sends a picture to the HDMI cable."}.get(st["state"], "")
             raise BairdError("no_signal", "There is no live picture right now.", hint, state=st["state"])
 
     # ------------------------------------------------------------------ internals
 
     def _set(self, **changes: Any) -> None:
-        with self._lock:
+        with self._changed:
             self.state.update(changes)
             snap = dict(self.state)
+            self._changed.notify_all()
         if self.on_state:
             try:
                 self.on_state(snap)
@@ -118,6 +177,9 @@ class CaptureEngine:
     def _kill(self) -> None:
         proc = self._proc
         if proc is None or proc.poll() is not None:
+            return
+        if self.fake:
+            proc.terminate()
             return
         try:
             if proc.stdin:
@@ -143,110 +205,91 @@ class CaptureEngine:
         exe = ensure_helper()
         return [str(exe), "--device", cfg["device"], "--audio", cfg["audio_input"], "--out", "-"]
 
-    def _wait(self, seconds: float) -> None:
-        self._wake.wait(seconds)
-        self._wake.clear()
-
     def _go_stuck(self, why: str) -> None:
         if self.state.get("state") != "stuck":
             log.error("capture device stuck: %s", why)
-            self._stuck_since = time.time()
-            self._saw_unplug = False
         self._set(state="stuck", message=STUCK_MESSAGE, hint=STUCK_HINT, input=None, kbps=0, since=None)
 
-    def _stuck_cleared(self, names: list[str]) -> bool:
-        """While stuck: True once the device was unplugged and is back, the stuck helpers are gone, or it is time for
-        another try anyway."""
-        dev = self.settings["device"].lower()
-        present = any(dev in n.lower() for n in names)
-        if not present:
-            self._saw_unplug = True
-            return False
-        if self._saw_unplug:
-            log.info("capture device plugged back in")
-            return True
-        if self._stuck_pids and not (self._stuck_pids & helper_pids()):
-            log.info("stuck capture helper went away")
-            return True
-        return time.time() - self._stuck_since >= STUCK_RETRY_S
-
-    def _clear_leftovers(self) -> None:
-        """Helpers left by an earlier run of the app hold the device; end them, and remember the ones that will not."""
-        pids = helper_pids()
-        if not pids:
-            return
-        log.warning("ending leftover capture helpers %s", sorted(pids))
-        kill_pids(pids)
-        time.sleep(2)
-        left = pids & helper_pids()
-        if left:
-            self._stuck_pids |= left
-            self._go_stuck(f"leftover helpers {sorted(left)} cannot be ended")
+    def _reserve_opening(self) -> float:
+        """Count each attempt before spawning, including across restarts sharing this data directory."""
+        db = sqlite3.connect(self._budget_path)
+        try:
+            with db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("CREATE TABLE IF NOT EXISTS openings (started REAL NOT NULL)")
+                now = time.time()
+                db.execute("DELETE FROM openings WHERE started <= ?", (now - OPEN_WINDOW_S,))
+                count, first = db.execute("SELECT COUNT(*), MIN(started) FROM openings").fetchone()
+                if count >= OPEN_LIMIT:
+                    return first + OPEN_WINDOW_S - now
+                db.execute("INSERT INTO openings VALUES (?)", (now,))
+                return 0.0
+        finally:
+            db.close()
 
     def _loop(self) -> None:
-        backoff = 2.0
-        if not self.fake:
-            try:
-                self._clear_leftovers()
-            except Exception:  # noqa: BLE001
-                log.debug("leftover check failed", exc_info=True)
         while not self._stop.is_set():
-            if not self.settings["capture_enabled"]:
-                self._set(state="off", message="Capture is off.", input=None, kbps=0, since=None)
-                self._wake.wait(30)
-                self._wake.clear()
-                continue
-            try:
-                if not self.fake:
-                    dev = self.settings["device"]
-                    names = list_devices()
-                    if self.state.get("state") == "stuck":
-                        if not self._stuck_cleared(names):
-                            self._wait(3)
-                            continue
-                        self._stuck_since = time.time()
-                        self._saw_unplug = False
-                        self._stuck_pids &= helper_pids()
-                    match = [n for n in names if dev.lower() in n.lower()]
-                    if not match:
-                        self._set(state="no_device", message=f"No capture device matching '{dev}' is connected.",
-                                  hint="", input=None, kbps=0)
-                        self._wait(3)
-                        continue
-                self._run_once()
-                backoff = 2.0
-            except BairdError as exc:
-                if exc.code == "stuck":
-                    self._go_stuck(exc.message)
-                else:
-                    self._set(state="error", message=exc.message, hint=exc.hint or "")
-                log.warning("capture: %s", exc.message)
-            except Exception as exc:  # noqa: BLE001
-                self._set(state="error", message=str(exc)[:300])
-                log.exception("capture loop")
+            self._wake.clear()
             if self._stop.is_set():
                 break
-            if self.state.get("state") == "stuck" and not self.fake:
-                continue  # the stuck branch above paces itself
-            self._wait(backoff)
-            backoff = min(backoff * 1.5, 10.0)
+            with self._lock:
+                wanted = self._wanted()
+                delay = max(self._retry_at, self._limit_until) - time.monotonic()
+            if not wanted:
+                self._wake.wait()
+                continue
+            if delay > 0:
+                self._wake.wait(delay)
+                continue
+
+            with self._lock:
+                self._opening = True
+            attempted = True
+            try:
+                if self._stuck_pids and not self.fake:
+                    self._stuck_pids &= helper_pids()
+                if self._stuck_pids:
+                    self._go_stuck("previous helper is still running")
+                else:
+                    attempted = self._run_once()
+            except Exception as exc:  # noqa: BLE001
+                self._set(state="error", message=str(exc)[:300], kbps=0, since=None)
+                log.exception("capture loop")
+            with self._changed:
+                if attempted and not self._restart.is_set() and self.state["state"] in ("no_signal", "no_device", "stuck", "error"):
+                    self._retry_at = time.monotonic() + RETRY_DELAYS_S[self._retry_step]
+                    self._retry_step = min(self._retry_step + 1, len(RETRY_DELAYS_S) - 1)
+                self._opening = False
+                self._restart.clear()
+                self._changed.notify_all()
         self._set(state="off", message="Stopped.", kbps=0, since=None)
 
-    def _run_once(self) -> None:
+    def _run_once(self) -> bool:
+        with self._lock:
+            if not self._wanted() or self._stop.is_set():
+                return False
         cmd = self._command()
-        self.buffer.reset()
-        if self.state.get("state") != "stuck":
-            self._set(state="starting", message="Opening the capture device…", hint="", kbps=0)
-        self._fatal = None
-        proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                bufsize=0, creationflags=NO_WINDOW)
+        with self._lock:
+            if not self._wanted() or self._stop.is_set() or self._restart.is_set():
+                return False
+            limit = self._reserve_opening()
+            if limit:
+                self._limit_until = time.monotonic() + limit
+            else:
+                self.buffer.reset()
+                self._fatal = None
+                proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE, bufsize=0, creationflags=NO_WINDOW)
+                self._proc = proc
+        if limit:
+            self._set(state="rate_limited", message="Hourly capture opening limit reached.", hint="", kbps=0, since=None)
+            return True
+        self._set(state="starting", message="Opening the capture device…", hint="", input=None, kbps=0, since=None)
         bind_to_app(proc)
-        self._proc = proc
         err_thread = threading.Thread(target=self._read_events, args=(proc,), name="baird-capture-events", daemon=True)
         err_thread.start()
         if self.fake:
-            self._set(state="running", message="Demo source (test pattern).", device="demo", encoder="ffmpeg",
-                      input={"width": 1280, "height": 720}, since=time.time(), audio=True)
+            self._set(device="demo", encoder="ffmpeg", input={"width": 1280, "height": 720}, audio=True)
         box = {"got_data": False}
         pump = threading.Thread(target=self._pump, args=(proc, box), name="baird-capture-pump", daemon=True)
         pump.start()
@@ -254,12 +297,20 @@ class CaptureEngine:
         started = time.time()
         killed_at: Optional[float] = None
         why = ""
+        closing = False
         while pump.is_alive():
-            pump.join(1.0)
+            pump.join(0.25)
             if not pump.is_alive():
                 break
             now = time.time()
             if killed_at is None:
+                with self._lock:
+                    closing = (self._stop.is_set() or self._restart.is_set() or not self.settings["capture_enabled"]
+                               or (not self._wanted() and time.monotonic() >= self._idle_until))
+                if closing:
+                    self._kill()
+                    killed_at = now
+                    continue
                 fatal = self._fatal
                 if fatal and now - fatal[2] > EXIT_GRACE_S:
                     why = f"did not leave after '{fatal[0]}'"
@@ -267,8 +318,6 @@ class CaptureEngine:
                     why = f"sent nothing for {START_LIMIT_S:.0f} s"
                 elif box["got_data"] and self.buffer.last_data and now - self.buffer.last_data > SILENCE_LIMIT_S:
                     why = f"went silent for {SILENCE_LIMIT_S:.0f} s"
-                elif self._stop.is_set() and proc.poll() is None:
-                    why = "app is stopping"
                 if why:
                     log.warning("capture helper %s %s; killing it", proc.pid, why)
                     proc.kill()
@@ -286,53 +335,59 @@ class CaptureEngine:
             self._fails += 1
             if not self._stop.is_set():
                 self._go_stuck(f"helper {proc.pid} {why or 'did not exit'} and cannot be ended")
-            return
+            return True
         err_thread.join(timeout=2)
         self._proc = None
+        if closing or self._restart.is_set() or self._stop.is_set():
+            self.buffer.reset()
+            self._set(state="idle", message="", hint="", input=None, kbps=0, since=None)
+            return True
         got_data = box["got_data"]
         with self._lock:
             self.state["restarts"] = int(self.state.get("restarts", 0)) + 1
         log.info("capture helper exited with %s", code)
-        if self._stop.is_set():
-            return
         fatal = self._fatal
         if got_data:
             self._fails = 0
-        if code in (4, 5) or (code == 0 and not got_data):
+        if code in (0, 4, 5) or (fatal and fatal[0] == "no_data") or (why and got_data and not fatal):
             self._fails = 0
             self._set(state="no_signal", message="No picture: the other computer is off, asleep or not sending to HDMI.",
                       hint="", kbps=0, since=None)
         elif code == 2:
             self._fails = 0
             self._set(state="no_device", message="The capture device disappeared.", hint="", kbps=0, since=None)
-        elif code not in (0, None):
+        else:
             self._fails += 1
             hung = fatal is not None and fatal[0] == "run_failed" and "8007001F" in fatal[1].upper()
             if hung or self._fails >= 3 or self.state.get("state") == "stuck":
                 self._go_stuck(f"{fatal[1] if fatal else f'exit {code}'} ({self._fails} failures in a row)")
             elif self.state.get("state") != "error":
                 self._set(state="error", message=f"The capture helper stopped (code {code}).", kbps=0, since=None)
+        return True
 
     def _pump(self, proc: subprocess.Popen, box: dict[str, bool]) -> None:
         """Read the helper's stdout until it closes, feeding the buffer and the listeners."""
         out = proc.stdout
         if out is None:
             return
+        ready = False
         try:
             while True:
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
-                if not chunk:
+                if not chunk or self._proc is not proc:
                     break
                 aligned, starts = self.buffer.feed(chunk)
                 if not aligned:
                     continue
                 end_total = self.buffer.bytes_total
-                if not box["got_data"]:
-                    box["got_data"] = True
+                box["got_data"] = True
+                if not ready and self.buffer.latest()[1]:
+                    ready = True
                     self._fails = 0
-                    self._stuck_pids.clear()
-                    if self.state["state"] != "running":
-                        self._set(state="running", message="", hint="", since=time.time())
+                    with self._lock:
+                        self._retry_step = 0
+                        self._retry_at = 0.0
+                    self._set(state="running", message="", hint="", since=time.time())
                 with self._lock:
                     listeners = list(self._listeners)
                 for fn in listeners:
@@ -368,10 +423,8 @@ class CaptureEngine:
             elif kind == "error":
                 code = str(evt.get("code", ""))
                 message = str(evt.get("message", ""))[:300]
-                self._fatal = (code, message, time.time())
-                if self.state.get("state") != "stuck":
-                    state = "no_signal" if code == "no_data" else "no_device" if code == "device_not_found" else "error"
-                    self._set(state=state, message=message, hint="")
+                if self._proc is proc:
+                    self._fatal = (code, message, time.time())
                 log.warning("capture helper: %s", line[:400])
             elif kind == "warning":
                 log.warning("capture helper: %s", line[:400])

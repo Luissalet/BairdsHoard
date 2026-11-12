@@ -74,16 +74,23 @@ class LiveRemux:
                 self._idle_timer.cancel()
                 self._idle_timer = None
             if self._proc is None or self._proc.poll() is not None:
-                self._start()
+                if self.engine.snapshot()["state"] == "running":
+                    try:
+                        self._start()
+                    except Exception:
+                        self._viewers.remove(viewer)
+                        raise
             elif self._init:
                 viewer.push({"type": "init", "mime": self._mime})
                 viewer.push(self._init)
+            self.engine.set_demand(viewer, True)
         return viewer
 
     def detach(self, viewer: _Viewer) -> None:
         with self._lock:
             if viewer in self._viewers:
                 self._viewers.remove(viewer)
+                self.engine.set_demand(viewer, False)
             if not self._viewers and self._idle_timer is None:
                 self._idle_timer = threading.Timer(15.0, self._stop_if_idle)
                 self._idle_timer.daemon = True
@@ -148,13 +155,14 @@ class LiveRemux:
                 proc.kill()
             log.info("live remuxer stopped")
 
-    def restart(self) -> None:
+    def source_changed(self, running: bool) -> None:
         """The source changed (new capture session): viewers get a reset and a new init segment."""
         with self._lock:
             self._stop_proc()
             if self._viewers:
                 self._broadcast({"type": "reset"})
-                self._start()
+                if running:
+                    self._start()
 
     def stop(self) -> None:
         with self._lock:

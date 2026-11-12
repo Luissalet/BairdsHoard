@@ -28,8 +28,9 @@
       <div class="stage" id="stage">
         <video id="video" muted playsinline autoplay></video>
         <div class="stage-msg" id="stage-msg" hidden>
-          <div class="stage-msg-title" id="stage-msg-title"></div>
+          <div class="stage-msg-title" id="stage-msg-title" role="status"></div>
           <div class="stage-msg-hint" id="stage-msg-hint"></div>
+          <button class="btn" id="btn-retry" type="button" hidden>Reintentar ahora</button>
         </div>
         <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span><span id="rec-time">0:00</span></div>
         <div class="flash" id="flash"></div>
@@ -74,7 +75,9 @@
     <form method="dialog" id="settings-form">
       <h2>Ajustes</h2>
       <label class="row switch"><input type="checkbox" name="capture_enabled"> <span>Captura activada <small>(desactívala para usar la capturadora en otro programa)</small></span></label>
+      <label class="row switch"><input type="checkbox" name="capture_always_on"> <span>Captura siempre activa <small>(opcional. Las reaperturas repetidas del controlador antiguo contribuyeron al pantallazo azul del 12 de noviembre)</small></span></label>
       <label class="row"><span>Capturadora</span><select name="device" id="sel-device"></select></label>
+      <button class="btn" id="btn-devices" type="button">Buscar capturadoras</button>
       <label class="row"><span>Audio</span>
         <select name="audio_input"><option value="hdmi">HDMI (el sonido del ordenador)</option><option value="line">Entrada de línea (3,5 mm)</option></select></label>
       <label class="row"><span>Formato de captura</span>

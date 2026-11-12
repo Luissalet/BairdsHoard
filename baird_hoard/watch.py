@@ -102,7 +102,8 @@ OcrFn = Callable[[str], dict[str, Any]]
 
 class WatchEngine:
     def __init__(self, path: Path, library: Any, engine: Any, work_dir: Path, *, ocr_fn: OcrFn, notify_fn: Optional[NotifyFn] = None,
-                 emit_fn: Optional[EmitFn] = None, clock: Callable[[], float] = time.time):
+                 emit_fn: Optional[EmitFn] = None, clock: Callable[[], float] = time.time,
+                 on_demand: Optional[Callable[[bool], None]] = None):
         self.path = path
         self.library = library
         self.engine = engine
@@ -111,6 +112,7 @@ class WatchEngine:
         self.notify_fn = notify_fn
         self.emit_fn = emit_fn
         self.clock = clock
+        self.on_demand = on_demand
         self._lock = threading.RLock()
         raw = read_json(path, default={}) or {}
         self._rules: list[dict[str, Any]] = [r for r in raw.get("rules", []) if isinstance(r, dict)]
@@ -127,13 +129,23 @@ class WatchEngine:
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="baird-watch", daemon=True)
         self._thread.start()
+        with self._lock:
+            self._sync_demand()
 
     def stop(self) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
+            self._sync_demand()
+
+    def _sync_demand(self) -> None:
+        if self.on_demand:
+            active = bool(self._thread and not self._stop.is_set() and any(r.get("enabled") for r in self._rules))
+            self.on_demand(active)
 
     def _save(self) -> None:
         with self._lock:
             write_json_atomic(self.path, {"rules": self._rules, "events": self._events[-MAX_EVENTS:]})
+            self._sync_demand()
 
     # ------------------------------------------------------------------ rules
 
@@ -212,7 +224,7 @@ class WatchEngine:
             except Exception:  # noqa: BLE001 - the watcher must keep going
                 log.debug("watch tick failed", exc_info=True)
 
-    def check(self, rule_id: str, respect_enabled: bool = False) -> dict[str, Any]:
+    def check(self, rule_id: str, respect_enabled: bool = False, *, picture: Optional[Callable[[], None]] = None) -> dict[str, Any]:
         """Look once now. Returns ``{value, fired, detail}`` (``value`` is the % changed, or whether the text is seen)."""
         with self._lock:
             rule = dict(self._find(rule_id))
@@ -221,7 +233,7 @@ class WatchEngine:
         st["next"] = now + rule["interval_s"]
         st["checked"] = now
         try:
-            self.engine.require_picture()
+            (picture or self.engine.require_picture)()
             result = self._look_change(rule, st, now) if rule["kind"] == "change" else self._look_text(rule, st)
             st["error"] = ""
         except BairdError as exc:

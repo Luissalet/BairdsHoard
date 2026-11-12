@@ -63,18 +63,39 @@ function fmtTime(iso) {
 class LivePlayer {
   constructor(el) {
     this.el = el; this.ws = null; this.ms = null; this.sb = null; this.queue = []; this.mime = '';
-    this.retry = 1000; this.wantInit = false;
+    this.retry = 1000; this.retryTimer = null;
+    this.pageActive = true;
     setInterval(() => this.chase(), 400);
-    document.addEventListener('visibilitychange', () => { if (!document.hidden) this.chase(true); });
+    document.addEventListener('visibilitychange', () => this.sync());
+    el.addEventListener('enterpictureinpicture', () => this.sync());
+    el.addEventListener('leavepictureinpicture', () => this.sync());
+    window.addEventListener('pagehide', () => { this.pageActive = false; this.sync(); });
+    window.addEventListener('pageshow', () => { this.pageActive = true; this.sync(); });
+  }
+
+  sync() {
+    if (this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
+      this.connect();
+      this.chase(true);
+    } else {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+      const ws = this.ws;
+      this.ws = null;
+      if (ws) ws.close();
+      this.teardown();
+    }
   }
 
   connect() {
+    if (this.ws || this.retryTimer) return;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/api/live`);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     ws.onopen = () => { this.retry = 1000; };
     ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
       if (typeof ev.data === 'string') {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'init') this.setup(msg.mime);
@@ -85,8 +106,10 @@ class LivePlayer {
       this.pump();
     };
     ws.onclose = () => {
+      if (this.ws !== ws) return;
+      this.ws = null;
       this.teardown();
-      setTimeout(() => this.connect(), this.retry);
+      this.retryTimer = setTimeout(() => { this.retryTimer = null; this.sync(); }, this.retry);
       this.retry = Math.min(this.retry * 1.6, 8000);
     };
   }
@@ -161,16 +184,18 @@ function concat(parts) {
 }
 
 const player = new LivePlayer(video);
-player.connect();
+player.sync();
 
 // ---------------------------------------------------------------- status
 
 const STATE_TEXT = {
   running: 'En directo', starting: 'Conectando…', no_signal: 'Sin señal', no_device: 'Sin capturadora',
-  off: 'Captura apagada', error: 'Error', stuck: 'Bloqueada',
+  idle: 'En espera', rate_limited: 'Límite de aperturas', off: 'Captura apagada', error: 'Error', stuck: 'Bloqueada',
 };
 const STATE_HINT = {
   starting: ['Abriendo la capturadora…', ''],
+  idle: ['Captura en espera', ''],
+  rate_limited: ['Límite de aperturas alcanzado', 'Baird esperará antes de volver a abrir la capturadora.'],
   no_signal: ['Sin señal', 'El otro ordenador está apagado, en reposo o no manda imagen por HDMI.'],
   no_device: ['Capturadora no conectada', 'Conecta la AVerMedia Live Gamer Portable Lite por USB.'],
   off: ['Captura apagada', 'Actívala en Ajustes.'],
@@ -192,10 +217,14 @@ async function refreshStatus() {
     ? `${(cap.kbps / 1000).toFixed(1)} Mb/s · ${Math.round(cap.buffered_seconds || 0)} s en memoria`
     : '';
   const msg = STATE_HINT[s];
+  $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error'].includes(s);
   $('stage-msg').hidden = s === 'running' || !msg;
   if (msg) {
-    $('stage-msg-title').textContent = msg[0];
-    $('stage-msg-hint').textContent = s === 'error' ? (cap.message || '') : msg[1];
+    if ($('stage-msg-title').textContent !== msg[0]) $('stage-msg-title').textContent = msg[0];
+    const hint = s === 'error' ? (cap.message || '') : msg[1];
+    $('stage-msg-hint').textContent = cap.retry_in_s > 0 && s !== 'off'
+      ? [hint, `Próximo intento en ${fmtDur(Math.ceil(cap.retry_in_s))}.`].filter(Boolean).join(' ')
+      : hint;
   }
   const live = s === 'running';
   $('btn-shot').disabled = !live;
@@ -228,6 +257,11 @@ async function refreshStatus() {
     }
   }
 }
+
+$('btn-retry').addEventListener('click', async () => {
+  try { await api('/api/capture/retry', { method: 'POST' }); await refreshStatus(); }
+  catch (err) { fail(err); }
+});
 
 function setChip(s, text) {
   $('chip').dataset.state = s;
@@ -434,20 +468,11 @@ $('tabs').addEventListener('click', (e) => {
 async function openSettings() {
   const form = $('settings-form');
   try {
-    const [s, d] = await Promise.all([api('/api/settings'), api('/api/devices').catch(() => ({ devices: [] }))]);
+    const s = await api('/api/settings');
     state.settings = s;
-    const sel = $('sel-device');
-    sel.textContent = '';
-    const names = d.devices.length ? d.devices : [s.device];
-    for (const n of names) {
-      const o = document.createElement('option');
-      const match = n.toLowerCase().includes((s.device || '').toLowerCase());
-      o.value = n.match(/C\d{3}/) ? n.match(/C\d{3}/)[0] : n;
-      o.textContent = n;
-      if (match) o.selected = true;
-      sel.appendChild(o);
-    }
+    showDevices([], s.device);
     form.capture_enabled.checked = s.capture_enabled;
+    form.capture_always_on.checked = s.capture_always_on;
     for (const k of ['audio_input', 'snapshot_format', 'clip_seconds', 'buffer_seconds', 'light_height', 'light_kbps']) {
       const el = form[k];
       if (![...el.options].some((o) => o.value === String(s[k]))) {
@@ -466,12 +491,30 @@ async function openSettings() {
   $('settings').showModal();
 }
 
+function showDevices(names, current) {
+  const sel = $('sel-device');
+  sel.textContent = '';
+  for (const name of names) {
+    const option = document.createElement('option');
+    option.value = name.match(/C\d{3}/)?.[0] || name;
+    option.textContent = name;
+    sel.appendChild(option);
+  }
+  if (![...sel.options].some((option) => option.value === current)) sel.add(new Option(current, current));
+  sel.value = current;
+}
+
+$('btn-devices').addEventListener('click', async () => {
+  try { const data = await api('/api/devices'); showDevices(data.devices, $('sel-device').value); }
+  catch (err) { fail(err); }
+});
+
 $('btn-settings').addEventListener('click', openSettings);
 $('settings').addEventListener('close', async () => {
   if ($('settings').returnValue !== 'save') return;
   const f = $('settings-form');
   const body = {
-    capture_enabled: f.capture_enabled.checked, device: f.device.value, audio_input: f.audio_input.value,
+    capture_enabled: f.capture_enabled.checked, capture_always_on: f.capture_always_on.checked, device: f.device.value, audio_input: f.audio_input.value,
     snapshot_format: f.snapshot_format.value, clip_seconds: +f.clip_seconds.value, buffer_seconds: +f.buffer_seconds.value,
     media_dir: f.media_dir.value.trim(), light_height: +f.light_height.value, light_kbps: +f.light_kbps.value,
     ocr_auto: f.ocr_auto.checked, hotkeys_enabled: f.hotkeys_enabled.checked,

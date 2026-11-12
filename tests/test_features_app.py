@@ -34,7 +34,7 @@ def env(tmp_path):
     cfg = Config(data_dir=tmp_path / "data", port=5232, fake=True, data_dir_configured=True)
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "settings.json").write_text(
-        '{"media_dir": "%s", "clip_seconds": 3, "hotkeys_enabled": false}' % str(tmp_path / "media").replace("\\", "\\\\"))
+        '{"media_dir": "%s", "clip_seconds": 3, "capture_always_on": true, "hotkeys_enabled": false}' % str(tmp_path / "media").replace("\\", "\\\\"))
     svc = Services(cfg)
     svc.ocr.ocr_fn = lambda path: {"ok": OCR["ok"], "text": OCR["text"], "backend": "fake", "error": "" if OCR["ok"] else "no ocr"}
     notes, bus = [], []

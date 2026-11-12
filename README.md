@@ -27,8 +27,8 @@ Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5
 Other keys: `M` sound, `F` full screen (double click on the picture also).
 
 If the device's driver stops responding (it can happen when the other computer goes to sleep), the status shows
-**La capturadora no responde**: unplug the device's USB cable, wait five seconds and plug it back in; Baird starts
-again by itself.
+**La capturadora no responde**: unplug the device's USB cable, wait five seconds and plug it back in; Baird retries
+while capture is requested.
 
 ## Hardware
 
@@ -54,9 +54,14 @@ the C# compiler that ships with Windows (.NET Framework 4.8).
 
 Files go to `Videos\Baird` by default (Settings → Folder). Settings, thumbnails and logs live in `data/`.
 
+Capture opens on demand. A visible live view, a recording, an enabled watch rule or a picture tool can open the
+device. It closes after 10 seconds without demand. The live view offers **Reintentar ahora** after signal loss and
+shows the hourly opening limit when it is reached. The Hub skips Baird when it starts a profile at startup or
+runs **Start all**. See [device notes](docs/DEVICE.md) for the November 2026 incident and retry policy.
+
 ## Settings
 
-Capture on/off (off frees the device for other programs), device, audio input (HDMI or line in), screenshot format,
+Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or line in), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
 shortcuts on/off and their key combinations (each needs a modifier and must differ).
 
@@ -75,7 +80,8 @@ from `data/mcp-token`).
 | Route | |
 |---|---|
 | `GET /api/health` | service, capture state, input resolution |
-| `GET /api/status` | capture, recording, jobs, viewers |
+| `GET /api/status` | capture, recording, jobs, viewers and retry timing |
+| `POST /api/capture/retry` | advance a pending retry while there is demand, within the hourly limit |
 | `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | the three buttons |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | library, files, thumbnails |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | file actions |

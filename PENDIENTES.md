@@ -15,4 +15,10 @@ de WebSocket) están en el commit d5ba419 y no necesitan seguimiento.
 - Tras perder la señal a las 00:55, `IMediaControl.Run` falló con `0x8007001F` y el proceso de captura se quedó
   atascado dentro del driver: Baird esperaba a que saliera sin límite y se quedaba para siempre en «No se pudo abrir
   la capturadora». Ahora mata el proceso, pasa al estado `stuck` con la indicación de desenchufar y enchufar el USB y
-  arranca solo al reenchufar (ver docs/DEVICE.md, «When the device stops responding»).
+  reintenta al quedar libre el dispositivo si sigue habiendo demanda (ver docs/DEVICE.md, «When the device stops responding»).
+
+## Incidente del 12-11-2026
+
+El volcado del pantallazo azul incluye `AVer330USB.sys` y `USBXHCI.SYS`. Baird abría y cerraba la GL310 sin
+señal aunque nadie la usara. La corrección se valida con motor falso. Se pospone la comprobación con el
+controlador real hasta que se decida volver a usar la capturadora. Véase [DEVICE.md](docs/DEVICE.md).

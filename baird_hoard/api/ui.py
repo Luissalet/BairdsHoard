@@ -78,6 +78,11 @@ def status(request: Request):
     return services(request).status()
 
 
+@router.post("/api/capture/retry")
+def capture_retry(request: Request):
+    return tool(request, "capture_retry")
+
+
 @router.post("/api/snapshot")
 def snapshot(request: Request, body: SnapshotBody | None = None):
     """The whole picture, or only ``region`` of it (``unit`` fraction = 0..1 of the picture, px = input pixels)."""

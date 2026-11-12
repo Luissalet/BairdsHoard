@@ -17,7 +17,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   (`media_copy`), show in Explorer, rename, light 720p copy for chats (`media_light_copy`, NVENC or x264), delete to
   the Recycle Bin (`media_delete`, confirm=true).
 - Look at a saved file as an image (`media_look`; a video shows its first frame).
-- Settings (`settings_get` / `settings_set`): capture on/off, device, audio input (HDMI/line), screenshot format, clip
+- Settings (`settings_get` / `settings_set`): capture on/off, optional `capture_always_on`, device, audio input (HDMI/line), screenshot format, clip
   length, memory window, media folder, light-copy size and bitrate.
 - Capture only a zone: drag a rectangle over the live view (key `Z`) or pass `region` (`{x,y,w,h,unit}`, pixels or
   fractions) to `snapshot_save` / `screen_look`.
@@ -34,9 +34,12 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Global shortcuts for capture (default Ctrl+Alt+C) and clip (Ctrl+Alt+X) even without focus, configurable in
   Settings (`hotkeys_status`). A small helper process registers them with Windows and dies with the app.
 - Recover by itself after the device is unplugged, the other computer sleeps or the cable is pulled (states
-  `no_device`, `no_signal`, back to `running` when the picture returns).
+  `no_device`, `no_signal`, `rate_limited`, back to `running` when the picture returns).
+- Open capture on demand (live viewer, recording, enabled watch rule or picture tool), then release it after ten
+  idle seconds. Consecutive failures back off at 15 s, 1 min, 5 min and 15 min maximum. The `capture_retry` tool
+  advances the next attempt with demand and shares the 12-per-hour limit. The Hub skips automatic startup.
 - Notice when the device's driver stops responding (state `stuck`, with the hint to unplug and replug the USB cable),
-  end capture helpers left behind by an earlier run, and start again by itself once the device is plugged back in.
+  wait for a stuck helper to exit, then retry if capture is still requested.
   The helper never outlives the app.
 
 ## Cannot (by design or by the hardware)

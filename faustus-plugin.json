@@ -16,7 +16,8 @@
     "avermedia-lgp"
   ],
   "x-family": {
-    "copilot": true
+    "copilot": true,
+    "auto_start": false
   },
   "placeholders": [
     "BAIRD_DIR",
