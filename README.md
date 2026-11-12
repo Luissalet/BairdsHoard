@@ -1,10 +1,16 @@
 # Baird's Hoard
 
+[Español](README.es.md)
+
 Live view, screenshots, instant clips and recordings of another computer plugged into this PC through an HDMI
 capture device, with files you can drag or paste straight into a chat, and an MCP bridge so assistants can look at
 that screen too.
 
 Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5232**.
+
+## What it is
+
+Baird's Hoard turns an HDMI capture device into a tool for working with another computer's screen: you watch it live, grab screenshots, keep the last seconds, record, annotate, search the text on captured screens and watch for changes. Every file is ready to drag into a chat, and assistants get the same abilities through MCP.
 
 ## What it does
 
@@ -57,7 +63,7 @@ Files go to `Videos\Baird` by default (Settings → Folder). Settings, thumbnail
 Capture opens on demand. A visible live view, a recording, an enabled watch rule or a picture tool can open the
 device. It closes after 10 seconds without demand. The live view offers **Reintentar ahora** after signal loss and
 shows the hourly opening limit when it is reached. The Hub skips Baird when it starts a profile at startup or
-runs **Start all**. See [device notes](docs/DEVICE.md) for the November 2026 incident and retry policy.
+runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 ## Settings
 
@@ -65,15 +71,25 @@ Capture on/off (off frees the device for other programs), optional always-on cap
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
 shortcuts on/off and their key combinations (each needs a modifier and must differ).
 
-## For assistants
+## Connection with Faustus and Hoard Hub
 
-`mcp_server.py` is a stdio MCP bridge (it starts the app when it is not running). Tools: `capture_status`,
-`screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_stop`, `media_list`, `media_look`,
-`media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list`, `settings_get`,
-`settings_set`, `media_search`, `media_ocr`, `ocr_reindex`, `send_to_faustus`, `watch_list`, `watch_add`,
-`watch_update`, `watch_remove`, `watch_check`, `watch_events`, `hotkeys_status`. `snapshot_save` and `screen_look`
-accept a `region`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
+The Hub starts and stops the app from its tile and the plugin manifest `faustus-plugin.json` registers it in Faustus. Screenshots and clips can be sent to a new Faustus chat, and watch alerts go out on the family bus and through the Hub.
+
+`mcp_server.py` is a stdio MCP bridge (it starts the app when it is not running). Tools by group:
+
+| Group | Tools |
+|---|---|
+| Capture | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_stop` |
+| Library | `media_list`, `media_look`, `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list` |
+| Text | `media_search`, `media_ocr`, `ocr_reindex` |
+| Faustus | `send_to_faustus` |
+| Watch | `watch_list`, `watch_add`, `watch_update`, `watch_remove`, `watch_check`, `watch_events`, `hotkeys_status` |
+| Settings | `settings_get`, `settings_set` |
+
+`snapshot_save` and `screen_look` accept a `region`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
 from `data/mcp-token`).
+
+This app carries procedures from the skill library of the family's workspace for the agents that connect to it: `screen-capture-evidence`, `systematic-debugging`. They are named in what an agent reads on connecting, read with `skills_list` and `skill_read`, searched and assigned with `skills_library` and `skills_assign`, and offered as prompts. The person chooses them on the skills page (`/api/agent/skills/page`) or in the Hub's Skills tab; the `skills` block of `faustus-plugin.json` holds what the app asks for by default.
 
 ## HTTP API
 
@@ -101,10 +117,18 @@ from `data/mcp-token`).
 
 `BAIRD_FAKE=1` replaces the device with an ffmpeg test pattern (used by the tests and for demos).
 
+## Project layout
+
+| Path | Contents |
+|---|---|
+| `baird_hoard/` | Application: capture, live stream, media library, OCR, watch rules, hotkeys, API |
+| `baird_hoard/static/` | Web interface |
+| `native/` | `bairdcap` helper that reads the device (source and compiled binary) |
+| `mcp_server.py` | MCP bridge |
+| `docs/DEVICE.md` | How the capture works |
+| `tests/` | Test suite |
+| `data/` | Settings, thumbnails, logs and the MCP token |
+
 ## License
 
 MIT. Third-party parts: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Skills for the agents that connect
-
-This app carries procedures from the skill library of the family's workspace for the agents that connect to it: `screen-capture-evidence`, `systematic-debugging`. They are named in what an agent reads on connecting, read with `skills_list` and `skill_read`, searched and assigned with `skills_library` and `skills_assign`, and offered as prompts. The person chooses them on the skills page (`/api/agent/skills/page`) or in the hub's Skills tab; the `skills` block of `faustus-plugin.json` holds what the app asks for by default.
