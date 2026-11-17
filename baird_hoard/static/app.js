@@ -438,10 +438,64 @@ async function record() {
   } catch (err) { fail(err); }
 }
 
+// Audio meter. The element plays unmuted into a Web Audio graph (source -> analyser -> gain -> speakers) so the
+// analyser hears the capture even when the speaker button is off; that button only moves the gain.
+const meter = { ctx: null, an: null, gain: null, buf: null, speaker: false, peak: 0, peakAt: 0, loudAt: 0 };
+
+function setupMeter() {
+  if (meter.ctx) return true;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return false;
+  try {
+    const ctx = new AC();
+    const src = ctx.createMediaElementSource(video);
+    const an = ctx.createAnalyser();
+    an.fftSize = 2048;
+    const gain = ctx.createGain();
+    gain.gain.value = meter.speaker ? 1 : 0;
+    src.connect(an); an.connect(gain); gain.connect(ctx.destination);
+    Object.assign(meter, { ctx, an, gain, buf: new Float32Array(an.fftSize) });
+    video.muted = false;
+    requestAnimationFrame(drawMeter);
+    return true;
+  } catch (e) { console.warn('meter', e); return false; }
+}
+
+function resumeMeter() {
+  if (setupMeter() && meter.ctx.state === 'suspended') meter.ctx.resume().catch(() => {});
+}
+
+function drawMeter(now) {
+  requestAnimationFrame(drawMeter);
+  const { an, buf } = meter;
+  if (!an) return;
+  an.getFloatTimeDomainData(buf);
+  // Remove the DC offset first: an unconnected analog input gives a flat non-zero line that is not sound.
+  let mean = 0;
+  for (let i = 0; i < buf.length; i++) mean += buf[i];
+  mean /= buf.length;
+  let sum = 0;
+  for (let i = 0; i < buf.length; i++) { const v = buf[i] - mean; sum += v * v; }
+  const rms = Math.sqrt(sum / buf.length);
+  const db = rms > 0 ? 20 * Math.log10(rms) : -120;
+  const pct = Math.max(0, Math.min(1, (db + 60) / 60));
+  if (pct >= meter.peak || now - meter.peakAt > 1200) { meter.peak = pct; meter.peakAt = now; }
+  if (db > -55) meter.loudAt = now;
+  $('vu-fill').style.width = (pct * 100).toFixed(1) + '%';
+  $('vu-peak').style.left = `calc(${(meter.peak * 100).toFixed(1)}% - 1px)`;
+  const suspended = meter.ctx.state === 'suspended';
+  const silent = !suspended && now - meter.loudAt > 3000;
+  $('vu').classList.toggle('silent', silent);
+  $('vu-label').textContent = suspended ? 'pulsa aquí' : silent ? 'sin audio' : `${Math.round(db)} dB`;
+}
+
 function toggleMute() {
-  video.muted = !video.muted;
-  $('btn-mute').textContent = video.muted ? '🔇' : '🔊';
-  if (!video.muted) video.play().catch(() => {});
+  resumeMeter();
+  meter.speaker = !meter.speaker;
+  if (meter.gain) meter.gain.gain.value = meter.speaker ? 1 : 0;
+  else video.muted = !meter.speaker;
+  $('btn-mute').textContent = meter.speaker ? '🔊' : '🔇';
+  video.play().catch(() => {});
 }
 
 function toggleFull() {
@@ -453,6 +507,9 @@ $('btn-shot').addEventListener('click', shot);
 $('btn-clip').addEventListener('click', clip);
 $('btn-rec').addEventListener('click', record);
 $('btn-mute').addEventListener('click', toggleMute);
+$('vu').addEventListener('click', resumeMeter);
+for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, resumeMeter, { passive: true });
+setupMeter();
 $('btn-full').addEventListener('click', toggleFull);
 $('stage').addEventListener('dblclick', toggleFull);
 $('btn-folder').addEventListener('click', () => api('/api/folder/reveal', { method: 'POST' }).catch(fail));
