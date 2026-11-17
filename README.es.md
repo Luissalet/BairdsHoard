@@ -8,13 +8,14 @@ Forma parte de la familia Hoard (Hoard Hub, Faustus). Funciona en local en Windo
 
 ## Qué es
 
-Baird's Hoard convierte una capturadora HDMI en una herramienta para trabajar con la pantalla de otro ordenador: la ves en directo, haces capturas, guardas los últimos segundos, grabas, anotas, buscas el texto de las pantallas capturadas y vigilas cambios. Cada archivo queda listo para arrastrarlo a un chat, y los asistentes tienen las mismas capacidades por MCP.
+Baird's Hoard convierte una capturadora HDMI en una herramienta para trabajar con la pantalla de otro ordenador: la ves en directo, mejoras la imagen con una GPU libre si quieres, haces capturas, guardas los últimos segundos, grabas, anotas, buscas el texto de las pantallas capturadas y vigilas cambios. Cada archivo queda listo para arrastrarlo a un chat, y los asistentes tienen las mismas capacidades por MCP.
 
 ## Qué hace
 
 | | |
 |---|---|
 | **Directo** | La pantalla del otro ordenador en una ventana, 1080p con sonido y menos de un segundo de retardo. Se copia el H.264/AAC que ya codifica la capturadora a MP4 fragmentado y lo reproduce el decodificador por hardware del navegador: sin recodificar, casi sin CPU. |
+| **Mejorar** | Cadena opcional en la GPU entre la señal y lo que ves y guardas, con un interruptor por efecto: reducción de ruido, superresolución (×1,5, ×2, ×3), nitidez, más fotogramas (mezcla para el directo, con movimiento compensado para vídeos guardados) y HDR10 para vídeos guardados. Los clips y las grabaciones salen de la imagen mejorada mientras está activa; las capturas y `screen_look` siguen siendo el original. Los efectos usan Vulkan (libplacebo, `nlmeans_vulkan`) y NVENC en la GPU que elijas, con alternativas por CPU; **Medir coste** dice cuántos milisegundos suma cada efecto por fotograma y si la cadena aguanta en tiempo real. Un vídeo guardado tiene su copia mejorada «(mejorado)» desde su tarjeta. |
 | **Captura** (`C`) | El fotograma actual exacto en PNG (o JPG), guardado en una décima de segundo. |
 | **Últimos segundos** (`B`) | Los últimos 30 s (configurable, hasta la ventana de memoria) en MP4 al instante: la app guarda el pasado reciente en memoria, cortado en fotogramas clave. |
 | **Grabar** (`R`) | Imagen y sonido hasta que pares; empieza en el fotograma clave anterior al clic. |
@@ -26,7 +27,7 @@ Baird's Hoard convierte una capturadora HDMI en una herramienta para trabajar co
 | **Vigilar** | Reglas que avisan cuando una zona cambia (o se queda quieta) o cuando aparece o desaparece un texto; el aviso guarda una captura, emite `baird.watch` en el bus de la familia y notifica por el Hub. |
 | **Vista mini** (`P`) | Ventana picture-in-picture siempre encima para vigilar el otro ordenador. |
 | **Atajos globales** | Ctrl+Alt+C (captura) y Ctrl+Alt+X (últimos segundos) aunque Baird no tenga el foco; se cambian en Ajustes. Un pequeño ayudante los registra en Windows y termina con la app. |
-| **Asistentes** | 27 herramientas MCP. `screen_look` devuelve la imagen actual para que el asistente vea el otro ordenador; también clip, grabación, biblioteca, copia al portapapeles… |
+| **Asistentes** | 32 herramientas MCP. `screen_look` devuelve la imagen actual para que el asistente vea el otro ordenador; también clip, grabación, biblioteca, copia al portapapeles, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
 
 Otras teclas: `M` sonido, `F` pantalla completa (o doble clic en la imagen).
 

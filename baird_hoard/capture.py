@@ -35,11 +35,12 @@ OPEN_WINDOW_S = 3600.0
 
 class CaptureEngine:
     def __init__(self, settings: Settings, buffer: TsBuffer, *, ffmpeg: Optional[str] = None, fake: bool = False,
-                 on_state: Optional[Callable[[dict[str, Any]], None]] = None):
+                 on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = ""):
         self.settings = settings
         self.buffer = buffer
         self.ffmpeg = ffmpeg
         self.fake = fake
+        self.fake_source = fake_source
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
@@ -197,6 +198,11 @@ class CaptureEngine:
         if self.fake:
             if not self.ffmpeg:
                 raise BairdError("unavailable", "ffmpeg is needed for the demo source.")
+            if self.fake_source:
+                return [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", self.fake_source,
+                        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-map", "0:v:0", "-map", "1:a:0",
+                        "-vf", "scale=1280:720,fps=30", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "30",
+                        "-b:v", "6M", "-maxrate", "7M", "-bufsize", "3M", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", "pipe:1"]
             return [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-re",
                     "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
                     "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",

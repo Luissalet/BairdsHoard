@@ -10,13 +10,14 @@ Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5
 
 ## What it is
 
-Baird's Hoard turns an HDMI capture device into a tool for working with another computer's screen: you watch it live, grab screenshots, keep the last seconds, record, annotate, search the text on captured screens and watch for changes. Every file is ready to drag into a chat, and assistants get the same abilities through MCP.
+Baird's Hoard turns an HDMI capture device into a tool for working with another computer's screen: you watch it live, optionally enhance the picture on a spare GPU, grab screenshots, keep the last seconds, record, annotate, search the text on captured screens and watch for changes. Every file is ready to drag into a chat, and assistants get the same abilities through MCP.
 
 ## What it does
 
 | | |
 |---|---|
 | **Live view** | The other computer's screen in a window, 1080p, with sound, under a second of delay. The device's own H.264/AAC is copied into fragmented MP4 and played by the browser's hardware decoder: no re-encoding, almost no CPU. |
+| **Enhance** | Optional GPU chain between the signal and what you see and save, one switch per effect: noise reduction, upscaling (×1.5, ×2, ×3), sharpening, frame-rate interpolation (blend for the live view, motion-compensated for saved files) and HDR10 for saved files. Clips and recordings come from the enhanced picture while it is on; screenshots and `screen_look` stay the original. The effects run on Vulkan (libplacebo, `nlmeans_vulkan`) and NVENC on one chosen GPU, with CPU fallbacks; **Measure cost** reports the milliseconds each effect adds per frame and whether the chain keeps up in real time. A saved video gets an enhanced "(mejorado)" copy from its card. |
 | **Screenshot** (`C`) | The exact current frame as PNG (or JPG), saved in a tenth of a second. |
 | **Last seconds** (`B`) | The last 30 s (configurable, up to the memory window) saved as MP4 instantly: the app keeps the recent past in memory, cut on key frames. |
 | **Record** (`R`) | Picture and sound until you stop; starts from the key frame before the click. |
@@ -28,7 +29,7 @@ Baird's Hoard turns an HDMI capture device into a tool for working with another 
 | **Watch** | Rules that alert when a zone changes (or stays still) or when text appears/disappears; an alert saves a picture, emits `baird.watch` on the family bus and notifies through the Hub. |
 | **Mini view** (`P`) | Always-on-top Picture-in-Picture window to keep an eye on the other computer. |
 | **Global shortcuts** | Ctrl+Alt+C (screenshot) and Ctrl+Alt+X (last seconds) even when Baird is not focused; configurable in Settings. A small helper registers them with Windows and ends with the app. |
-| **Assistants** | 27 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`… |
+| **Assistants** | 32 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
 
 Other keys: `M` sound, `F` full screen (double click on the picture also).
 
@@ -69,7 +70,7 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or line in), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
-shortcuts on/off and their key combinations (each needs a modifier and must differ).
+shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default).
 
 ## Connection with Faustus and Hoard Hub
 
@@ -106,8 +107,8 @@ This app carries procedures from the skill library of the family's workspace for
 | `GET /api/search?q=`, `GET /api/ocr/status`, `POST /api/ocr/reindex` | text search over screenshots |
 | `GET/POST /api/watch`, `PUT/DELETE /api/watch/{id}`, `POST /api/watch/{id}/check`, `GET /api/watch/events` | screen watch rules |
 | `GET /api/hotkeys` | global shortcut helper status |
-| `GET/PUT /api/settings`, `GET /api/devices` | settings |
-| `WS /api/live` | live fragmented MP4 (`init` JSON, init segment, fragments; `reset` starts a new stream) |
+| `GET/PUT /api/settings`, `GET /api/devices` | settings (`enhance` is an object; a partial update keeps the other keys) |
+| `WS /api/live` | live fragmented MP4 (`init` JSON, init segment, fragments; `reset` starts a new stream); the enhanced picture while the enhancement is on, `?view=raw` for the original |
 
 ## Tests
 
@@ -115,13 +116,13 @@ This app carries procedures from the skill library of the family's workspace for
 .venv\Scripts\python -m pytest
 ```
 
-`BAIRD_FAKE=1` replaces the device with an ffmpeg test pattern (used by the tests and for demos).
+`BAIRD_FAKE=1` replaces the device with an ffmpeg test pattern (used by the tests and for demos); `BAIRD_FAKE_SOURCE=<video file>` loops that file instead.
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `baird_hoard/` | Application: capture, live stream, media library, OCR, watch rules, hotkeys, API |
+| `baird_hoard/` | Application: capture, live stream, enhancement chain, media library, OCR, watch rules, hotkeys, API |
 | `baird_hoard/static/` | Web interface |
 | `native/` | `bairdcap` helper that reads the device (source and compiled binary) |
 | `mcp_server.py` | MCP bridge |

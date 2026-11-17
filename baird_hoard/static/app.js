@@ -114,6 +114,16 @@ class LivePlayer {
     };
   }
 
+  reconnect() {
+    clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    const ws = this.ws;
+    this.ws = null;
+    if (ws) ws.close();
+    this.teardown();
+    this.sync();
+  }
+
   setup(mime) {
     this.teardown();
     let type = mime;
@@ -251,8 +261,9 @@ async function refreshStatus() {
     if (job.state !== 'running' && !seen.has(job.id)) {
       seen.add(job.id);
       if (state.jobsStarted && state.jobsStarted.has(job.id)) {
-        if (job.state === 'done') { toast(`Copia ligera lista: ${job.target}`, 'ok'); markFresh(job.target); refreshList(true); }
-        else toast(`La copia ligera falló: ${job.message}`, 'err');
+        const what = job.kind === 'enhance' ? 'La copia mejorada' : 'La copia ligera';
+        if (job.state === 'done') { toast(`${what} está lista: ${job.target}`, 'ok'); markFresh(job.target); refreshList(true); }
+        else toast(`${what} falló: ${job.message}`, 'err');
       }
     }
   }
@@ -324,6 +335,7 @@ function card(item) {
         ${isVideo ? '' : '<button class="btn small" data-act="text" title="Texto que se lee en la captura (OCR)">Texto</button>'}
         <button class="btn small" data-act="reveal" title="Mostrar en el Explorador">Explorador</button>
         ${isVideo && item.origin !== 'light' ? '<button class="btn small" data-act="light" title="Copia de 720p para chats con límite de tamaño">Ligera</button>' : ''}
+        ${isVideo ? '<button class="btn small" data-act="enhance" title="Copia mejorada con los efectos de «Mejorar»">Mejorar</button>' : ''}
         <button class="btn small danger" data-act="delete" title="Enviar a la papelera">Borrar</button>
       </div>
     </div>`;
@@ -374,6 +386,10 @@ async function act(what, item) {
       const job = await api(`/api/media/${enc}/light`, { method: 'POST' });
       (state.jobsStarted || (state.jobsStarted = new Set())).add(job.id);
       toast('Haciendo la copia ligera…');
+    } else if (what === 'enhance') {
+      const job = await api('/api/ui/call', { method: 'POST', body: { name: 'media_enhance', arguments: { name: item.name } } });
+      (state.jobsStarted || (state.jobsStarted = new Set())).add(job.id);
+      toast('Mejorando el vídeo…');
     } else if (what === 'faustus') {
       await sendToFaustus(item);
     } else if (what === 'annotate') {
@@ -774,6 +790,97 @@ async function saveAnnotated(thenSend) {
 $('ann-save').addEventListener('click', () => saveAnnotated(false));
 $('ann-save-send').addEventListener('click', () => saveAnnotated(true));
 
+// ---------------------------------------------------------------- enhance the picture
+
+const callTool = (name, args) => api('/api/ui/call', { method: 'POST', body: { name, arguments: args || {} } });
+let enhanceTimer = null;
+
+function fillEnhance(fx) {
+  $('en-enabled').checked = !!fx.enabled;
+  $('en-record').checked = !!fx.record;
+  $('en-denoise').value = fx.denoise;
+  $('en-upscale').value = String(fx.upscale || 0);
+  $('en-sharpen').value = Math.round((fx.sharpen || 0) * 100);
+  $('en-interpolate').value = fx.interpolate;
+  $('en-hdr').checked = !!fx.hdr;
+}
+
+function describeEnhanceLive(live, caps) {
+  const bits = [];
+  if (caps) bits.push(`GPU ${caps.gpu}: ${caps.vulkan ? 'Vulkan' : 'sin Vulkan'}, ${caps.nvenc ? 'NVENC' : 'codificación por CPU'}`);
+  if (live && live.state === 'running') {
+    bits.push(`En marcha: ${live.fps ? live.fps.toFixed(0) : '?'} fotogramas/s (velocidad ×${(live.speed || 0).toFixed(2)})${live.dropped ? `, ${live.dropped} bloques descartados` : ''}`);
+    const ch = live.chain;
+    if (ch) {
+      bits.push(`Salida ${ch.width}×${ch.height} a ${ch.fps} fps con ${ch.applied.join(', ') || 'ningún efecto'}`);
+      for (const [k, v] of Object.entries(ch.skipped || {})) bits.push(`${k}: ${v}`);
+    }
+  } else if (live && live.message) bits.push(live.message);
+  else if (live && live.enabled) bits.push('Esperando imagen.');
+  $('en-live').textContent = bits.join(' · ');
+}
+
+function renderBenchmark(b) {
+  const el = $('en-bench');
+  if (!b) { el.textContent = 'Sin medir todavía.'; return; }
+  const labels = { denoise: 'Reducir ruido', upscale: 'Superresolución', sharpen: 'Nitidez', interpolate: 'Más fotogramas', hdr: 'HDR' };
+  const rows = [['Base (decodificar y codificar)', b.baseline], ...b.effects.map((r) => [labels[r.effect] || r.effect, r]), ['Todo junto', b.all]];
+  const lines = rows.filter(([, r]) => r).map(([name, r]) => {
+    if (!r.ok) return `${name}: no se pudo medir`;
+    const added = r.added_ms != null ? ` (${r.added_ms >= 0 ? '+' : ''}${r.added_ms} ms)` : '';
+    return `${name}: ${r.ms_per_frame} ms por fotograma${added}`;
+  });
+  const budget = `Presupuesto del directo: ${b.frame_budget_ms} ms por fotograma (${b.input.width}×${b.input.height} a ${b.input.fps} fps).`;
+  const verdict = (b.note ? 'El directo mejorado estaba en marcha durante la medida: los números incluyen su carga. ' : '') + (b.realtime ? 'La cadena completa cabe en tiempo real.' : 'La cadena completa no cabe en tiempo real con estos efectos.');
+  el.textContent = '';
+  for (const t of [budget, ...lines, verdict]) { const d = document.createElement('div'); d.textContent = t; el.appendChild(d); }
+}
+
+async function loadEnhance() {
+  const st = await callTool('enhance_status');
+  fillEnhance(st.settings);
+  describeEnhanceLive(st.live, st.capabilities);
+  renderBenchmark(st.last_benchmark);
+}
+
+async function saveEnhance() {
+  const body = {
+    enabled: $('en-enabled').checked, record: $('en-record').checked, denoise: $('en-denoise').value,
+    upscale: +$('en-upscale').value, sharpen: +$('en-sharpen').value / 100, interpolate: $('en-interpolate').value,
+    hdr: $('en-hdr').checked,
+  };
+  try {
+    const st = await callTool('enhance_set', body);
+    describeEnhanceLive(st.live, st.capabilities);
+    player.reconnect();
+    refreshStatus();
+  } catch (err) { fail(err); }
+}
+
+async function openEnhance() {
+  try { await loadEnhance(); } catch (err) { fail(err); return; }
+  if (!$('enhance').open) $('enhance').showModal();
+}
+
+$('btn-enhance').addEventListener('click', openEnhance);
+$('en-close').addEventListener('click', () => $('enhance').close());
+for (const id of ['en-enabled', 'en-record', 'en-denoise', 'en-upscale', 'en-sharpen', 'en-interpolate', 'en-hdr']) {
+  $(id).addEventListener('change', () => { clearTimeout(enhanceTimer); enhanceTimer = setTimeout(saveEnhance, 250); });
+}
+$('en-measure').addEventListener('click', async () => {
+  const btn = $('en-measure');
+  btn.disabled = true; btn.textContent = 'Midiendo…';
+  try { renderBenchmark(await callTool('enhance_benchmark', {})); } catch (err) { fail(err); }
+  btn.disabled = false; btn.textContent = 'Medir coste';
+});
+
+function trackEnhance(st) {
+  const en = st.enhance || {};
+  const cnt = $('enhance-count');
+  cnt.hidden = !en.enabled; cnt.textContent = en.enabled ? (en.state === 'running' ? 'activo' : '…') : '';
+  if ($('enhance').open && en.enabled) describeEnhanceLive(en, null);
+}
+
 // ---------------------------------------------------------------- watch the screen
 
 const watchForm = { region: null };
@@ -873,6 +980,7 @@ $('wf-add').addEventListener('click', async () => {
 });
 
 function trackWatchAndHotkeys(st) {
+  trackEnhance(st);
   const w = st.watch || {};
   const cnt = $('watch-count');
   cnt.hidden = !w.active; cnt.textContent = w.active || '';
