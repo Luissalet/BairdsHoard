@@ -123,7 +123,7 @@ class SettingsArgs(BaseModel):
     clip_seconds: Optional[int] = Field(None, ge=3, le=600)
     buffer_seconds: Optional[int] = Field(None, ge=10, le=600)
     snapshot_format: Optional[Literal["png", "jpg"]] = None
-    audio_input: Optional[Literal["hdmi", "line"]] = None
+    audio_input: Optional[str] = Field(None, pattern=r"^(hdmi|line|spdif|[0-9])$", description="hdmi, line (3.5 mm), spdif or a crossbar input number from the capture status.")
     capture_enabled: Optional[bool] = None
     capture_always_on: Optional[bool] = Field(None, description="Keep capture on without demand. Repeated opens of the legacy driver contributed to a Windows crash.")
     media_dir: Optional[str] = Field(None, max_length=500, description="Folder for the files; empty string = default.")

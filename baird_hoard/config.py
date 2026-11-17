@@ -43,7 +43,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
 }
 
 SNAPSHOT_FORMATS = ("png", "jpg")
-AUDIO_INPUTS = ("hdmi", "line")
+AUDIO_INPUTS = ("hdmi", "line", "spdif")
 
 
 @dataclass
@@ -147,8 +147,9 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     data["clip_seconds"] = int(min(max(int(data["clip_seconds"]), 3), data["buffer_seconds"]))
     if data["snapshot_format"] not in SNAPSHOT_FORMATS:
         raise ValueError("snapshot_format must be png or jpg")
-    if data["audio_input"] not in AUDIO_INPUTS:
-        raise ValueError("audio_input must be hdmi or line")
+    data["audio_input"] = str(data.get("audio_input") or "hdmi").strip().lower()
+    if data["audio_input"] not in AUDIO_INPUTS and not (data["audio_input"].isdigit() and len(data["audio_input"]) == 1):
+        raise ValueError("audio_input must be hdmi, line, spdif or a crossbar input number")
     data["capture_enabled"] = bool(data["capture_enabled"])
     data["capture_always_on"] = data["capture_always_on"] is True
     data["light_height"] = int(min(max(int(data["light_height"]), 240), 1080))

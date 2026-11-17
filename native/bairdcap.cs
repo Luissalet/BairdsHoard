@@ -171,7 +171,7 @@ static class Program
 
     // Route HDMI video (Video_SerialDigital) to the video decoder output and
     // the audio input that belongs to it (its related pin) to the audio output.
-    // audioPref: "hdmi" (default, the related pin), "line" or an input index.
+    // audioPref: "hdmi" (default, the related pin), "line", "spdif" or an input index.
     static void SelectHdmi(IAMCrossbar x, string audioPref)
     {
         int outs, ins; if (x.get_PinCounts(out outs, out ins) != 0) return;
@@ -193,10 +193,20 @@ static class Program
                 int n;
                 if (audioPref == "hdmi") want = hdmiAudio;
                 else if (int.TryParse(audioPref, out n)) want = n;
-                else for (int i = 0; i < ins; i++)
+                else
                 {
-                    int r2; PhysicalConnectorType it; x.get_CrossbarPinInfo(true, i, out r2, out it);
-                    if (it == PhysicalConnectorType.Audio_Line && x.CanRoute(o, i) == 0) { want = i; break; }
+                    // "line": an analog line input other than the one paired with HDMI (prefer the last one);
+                    // "spdif": the digital audio input.
+                    var kind = audioPref == "spdif" ? PhysicalConnectorType.Audio_SPDIFDigital : PhysicalConnectorType.Audio_Line;
+                    int fallback = -1;
+                    for (int i = 0; i < ins; i++)
+                    {
+                        int r2; PhysicalConnectorType it; x.get_CrossbarPinInfo(true, i, out r2, out it);
+                        if (it != kind || x.CanRoute(o, i) != 0) continue;
+                        if (fallback < 0) fallback = i;
+                        if (i != hdmiAudio) want = i;
+                    }
+                    if (want < 0) want = fallback;
                 }
             }
             int hr = want >= 0 && x.CanRoute(o, want) == 0 ? x.Route(o, want) : -1;
