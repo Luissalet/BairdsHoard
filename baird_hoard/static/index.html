@@ -17,6 +17,7 @@
     </div>
     <div id="chip" class="chip" data-state="starting"><span class="dot"></span><span id="chip-text">Conectando…</span></div>
     <div class="top-actions">
+      <button class="btn ghost" id="btn-enhance" title="Mejorar la imagen con la GPU: quitar ruido, subir resolución, nitidez, más fotogramas">Mejorar <span class="count" id="enhance-count" hidden></span></button>
       <button class="btn ghost" id="btn-watch" title="Avisar cuando cambie algo en la pantalla">Vigilar <span class="count" id="watch-count" hidden></span></button>
       <button class="btn ghost" id="btn-folder" title="Abrir la carpeta en el Explorador">Carpeta</button>
       <button class="btn ghost" id="btn-settings" title="Ajustes">Ajustes</button>
@@ -130,6 +131,30 @@
         <button class="btn" id="ann-cancel">Cancelar</button>
         <button class="btn" id="ann-save-send">Guardar y enviar a Faustus</button>
         <button class="btn primary" id="ann-save">Guardar copia</button>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog id="enhance" class="dialog wide">
+    <div class="dialog-body">
+      <h2>Mejorar la imagen</h2>
+      <p class="row-note">La señal pasa por una GPU libre antes de mostrarse y de guardarse. Cada efecto tiene su interruptor; «Medir coste» dice cuánto añade cada uno por fotograma.</p>
+      <label class="row switch"><input type="checkbox" id="en-enabled"><span>Mejorar el directo</span></label>
+      <label class="row switch"><input type="checkbox" id="en-record"><span>Clips y grabaciones con la imagen mejorada</span></label>
+      <label class="row"><span>Reducir ruido</span>
+        <select id="en-denoise"><option value="off">Desactivado</option><option value="light">Suave (CPU)</option><option value="medium">Media (GPU)</option><option value="strong">Fuerte (GPU)</option></select></label>
+      <label class="row"><span>Superresolución</span>
+        <select id="en-upscale"><option value="0">Desactivada</option><option value="1.5">×1,5</option><option value="2">×2</option><option value="3">×3</option></select></label>
+      <label class="row"><span>Nitidez</span><input type="range" id="en-sharpen" min="0" max="100" step="5"></label>
+      <label class="row"><span>Más fotogramas</span>
+        <select id="en-interpolate"><option value="off">Desactivado</option><option value="blend">Mezcla (directo)</option><option value="mci">Movimiento compensado (vídeos guardados)</option></select></label>
+      <label class="row switch"><input type="checkbox" id="en-hdr"><span>HDR (solo al mejorar vídeos guardados)</span></label>
+      <p class="row-note" id="en-live"></p>
+      <h3>Coste por fotograma</h3>
+      <div class="row-note" id="en-bench">Sin medir todavía.</div>
+      <div class="dialog-actions">
+        <button class="btn" id="en-measure" type="button">Medir coste</button>
+        <button class="btn" id="en-close" type="button">Cerrar</button>
       </div>
     </div>
   </dialog>

@@ -7,6 +7,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from .enhance import DEFAULT_ENHANCE, EFFECT_KEYS, OFF, demo_sample, effects_on, normalize_enhance
 from .errors import BairdError
 from .hoard_link.agentkit import Empty, Tool, ann
 from .hoard_link.agentkit import call_tool as _call_tool
@@ -19,6 +20,7 @@ screen_look returns the current picture of the other computer as an image (and s
 clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_stop record until stopped. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
 snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds screenshots by the text they show (read in the background with the family's OCR: Kafka's Hoard); media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
+enhance_set turns the GPU enhancement on and chooses the effects (denoise, upscale, sharpen, interpolate, hdr): the live view, clips and recordings then use the enhanced picture (screen_look and screenshots stay the original). enhance_status shows what it does now and what each effect costs per frame; enhance_benchmark measures that cost on a sample; media_enhance writes an enhanced copy of a saved video.
 Pictures of the other computer can show private information of the user: describe only what the task needs."""
 
 
@@ -132,6 +134,90 @@ class SettingsArgs(BaseModel):
     hotkeys_enabled: Optional[bool] = Field(None, description="Global shortcuts for screenshot and clip.")
     hotkey_shot: Optional[str] = Field(None, max_length=40, description="e.g. ctrl+alt+c")
     hotkey_clip: Optional[str] = Field(None, max_length=40, description="e.g. ctrl+alt+x")
+
+
+class EffectArgs(BaseModel):
+    denoise: Optional[Literal["off", "light", "medium", "strong"]] = Field(None, description="Noise reduction; medium and strong run on the GPU.")
+    upscale: Optional[float] = Field(None, ge=0, le=3, description="0 = off, or the factor the picture grows by: 1.5, 2 or 3 (never wider than 3840 px).")
+    sharpen: Optional[float] = Field(None, ge=0, le=1, description="Sharpening strength after the upscale, 0..1.")
+    interpolate: Optional[Literal["off", "blend", "mci"]] = Field(None, description="Frame-rate interpolation: blend is cheap and works live; mci (motion compensated) is for saved videos.")
+    interpolate_fps: Optional[int] = Field(None, ge=0, le=120, description="Target frame rate; 0 = double the source's.")
+    hdr: Optional[bool] = Field(None, description="SDR to HDR10 (HEVC). Saved videos only: the live view stays SDR.")
+    gpu: Optional[int] = Field(None, ge=0, le=7, description="Vulkan and NVENC index of the GPU the chain runs on (default 2).")
+
+
+class EnhanceSetArgs(EffectArgs):
+    enabled: Optional[bool] = Field(None, description="Send the live view (and clips and recordings) through the chain.")
+    record: Optional[bool] = Field(None, description="Clips and recordings come from the enhanced picture while it is on (default true).")
+
+
+class EnhanceFileArgs(NameArg, EffectArgs):
+    pass
+
+
+class EnhanceBenchArgs(EffectArgs):
+    source: str = Field("demo", max_length=260, description="demo = a synthetic noisy video (no capture needed), live = the last seconds of the capture, or a video's name from media_list.")
+    size: Literal["720p", "1080p"] = Field("720p", description="Picture size of the demo sample.")
+    frames: int = Field(150, ge=30, le=600, description="Frames the longer run of each measurement processes (a third of them for the shorter).")
+
+
+def _fx(svc: Services, a: EffectArgs) -> dict[str, Any]:
+    """The effects a call names (the others off), or the saved ones when it names none."""
+    given = {k: v for k, v in a.model_dump(exclude_none=True).items() if k in DEFAULT_ENHANCE}
+    base = svc.settings["enhance"]
+    if any(k in given for k in EFFECT_KEYS):
+        base = dict(base, **OFF)
+    return normalize_enhance(given, base)
+
+
+def _enhance_set(svc: Services, a: EnhanceSetArgs) -> dict[str, Any]:
+    changes = a.model_dump(exclude_none=True)
+    if not changes:
+        raise BairdError("invalid", "Nothing to change.", "Name an effect or enabled=true.")
+    svc.apply_settings({"enhance": changes})
+    return svc.enhance_status()
+
+
+def _enhance_file(svc: Services, a: EnhanceFileArgs) -> dict[str, Any]:
+    fx = _fx(svc, a)
+    if not effects_on(fx):
+        raise BairdError("invalid", "Choose at least one effect.", "denoise, upscale, sharpen, interpolate or hdr.")
+    return svc.library.enhance_copy(a.name, fx)
+
+
+def _enhance_benchmark(svc: Services, a: EnhanceBenchArgs) -> dict[str, Any]:
+    import uuid
+    fx = _fx(svc, a)
+    if not effects_on(fx):
+        fx = normalize_enhance({"denoise": "medium", "upscale": 2, "sharpen": 0.5, "interpolate": "blend"}, fx)
+    work = svc.config.work_dir
+    work.mkdir(parents=True, exist_ok=True)
+    temp = None
+    if a.source == "demo":
+        w, h = (1920, 1080) if a.size == "1080p" else (1280, 720)
+        temp = sample = demo_sample(svc.ffmpeg or "ffmpeg", work / f"bench-{uuid.uuid4().hex[:8]}.mp4", width=w, height=h,
+                                    seconds=max(4, a.frames // 30 + 1))
+    elif a.source == "live":
+        with svc.engine.request():
+            svc.engine.wait_for_picture()
+            parts = svc.buffer.since(4)
+        if not parts:
+            raise BairdError("no_signal", "Nothing is in memory yet.")
+        temp = sample = work / f"bench-{uuid.uuid4().hex[:8]}.ts"
+        sample.write_bytes(b"".join(parts))
+    else:
+        sample = svc.library.path_of(a.source)
+    try:
+        info = svc.enhancer.probe(sample)
+        frames = min(a.frames, max(30, int(info["fps"] * (info["duration"] or 4)) - 2))
+        busy = svc.stage.flowing
+        res = svc.enhancer.benchmark(fx, sample, info, frames)
+        if busy:   # the live chain shares the GPU and the CPU with the measurement
+            res["note"] = "The live enhancement was running during the measurement: the costs include its load. Turn it off for clean numbers."
+        return res
+    finally:
+        if temp is not None:
+            temp.unlink(missing_ok=True)
 
 
 def _region(a: Any) -> Optional[dict[str, Any]]:
@@ -248,7 +334,24 @@ TOOLS: list[Tool] = [
     Tool("hotkeys_status", _d("The global shortcuts for screenshot and clip: which combinations are registered and the last press.",
                               "Change them with settings_set (hotkey_shot, hotkey_clip, hotkeys_enabled)."),
          Empty, ann(read_only=True), lambda s, a: s.hotkeys.status(s.settings["hotkeys_enabled"])),
-    Tool("jobs_list", _d("Background jobs (light copies) and their state."), Empty, ann(read_only=True),
+    Tool("enhance_status", _d("The GPU enhancement: its settings, what the live chain does now (state, frames per second, speed, dropped data), "
+                              "what this machine supports (Vulkan, NVENC), the last cost measurement and the enhanced-copy jobs.",
+                              synonyms="mejora de vídeo, superresolución, reducir ruido"),
+         Empty, ann(read_only=True), lambda s, a: s.enhance_status(), timeout_s=60),
+    Tool("enhance_set", _d("Turn the GPU enhancement on or off and choose its effects: denoise, upscale, sharpen, interpolate, hdr.",
+                           "While it is on, the live view, clips and recordings use the enhanced picture; screenshots and screen_look stay the original. "
+                           "Each effect has its own switch; changing them restarts the chain for the next picture.",
+                           "mejorar la imagen, subir resolución, quitar ruido, más fotogramas, HDR"),
+         EnhanceSetArgs, ann(idempotent=True), _enhance_set, timeout_s=60),
+    Tool("enhance_benchmark", _d("Measure what each effect costs per frame (ms) on a sample, and whether the whole chain keeps up in real time.",
+                                 "source=demo needs no capture; live uses the last seconds of the capture; or a saved video. The effects are the ones "
+                                 "named here, else the ones that are on, else a standard set.", "coste por fotograma, medir la mejora"),
+         EnhanceBenchArgs, ann(), _enhance_benchmark, timeout_s=600),
+    Tool("media_enhance", _d("Make an enhanced copy of a saved video (name \"(mejorado)\") with the effects named (the others off) or, naming none, the ones that are on; background job.",
+                             "Needs the effects chosen: denoise, upscale, sharpen, interpolate (mci allowed here), hdr (HEVC HDR10). The original is kept.",
+                             "mejorar vídeo, superresolución, interpolar fotogramas"),
+         EnhanceFileArgs, ann(draft_safe=True), _enhance_file),
+    Tool("jobs_list", _d("Background jobs (light copies, enhanced copies) and their state."), Empty, ann(read_only=True),
          lambda s, a: {"jobs": s.library.jobs()}),
     Tool("settings_get", _d("Current settings (clip length, memory, folder, screenshot format, audio input)."), Empty,
          ann(read_only=True), lambda s, a: s.settings.get()),

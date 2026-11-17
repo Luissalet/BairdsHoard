@@ -10,6 +10,7 @@ from typing import Any
 from . import __version__
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .config import Config, Settings
+from .enhance import EnhanceStage, Enhancer, StageSource
 from .hoard_link import fam_notify, family
 from .hoard_link.tokens import read_or_create_token
 from .hotkeys import HotkeyHelper
@@ -34,9 +35,14 @@ class Services:
         self.ffprobe = ffprobe_path(self.ffmpeg)
         self.buffer = TsBuffer(keep_seconds=self.settings["buffer_seconds"])
         self._last_state = "off"
-        self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state)
+        self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
+                                    fake_source=config.fake_source)
         self.live = LiveRemux(self.engine, self.ffmpeg)
+        self.enhancer = Enhancer(self.ffmpeg, self.ffprobe, config.work_dir)
+        self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
+        self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
+        self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
         self.library.on_new_image = self.ocr.enqueue
         self.library.on_rename = self.ocr.renamed
@@ -64,6 +70,8 @@ class Services:
         self.ocr.stop()
         self.hotkeys.stop()
         self.live.stop()
+        self.stage.stop()
+        self.live_enhanced.stop()
         self.engine.stop()
 
     def _start_hotkeys(self) -> None:
@@ -77,8 +85,19 @@ class Services:
         state = snap.get("state", "")
         previous, self._last_state = self._last_state, state
         self.library.recorder.on_capture_state(state)
+        self.stage.raw_state(state == "running")
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
+
+    def _on_stage(self, running: bool) -> None:
+        """The enhanced picture started or stopped flowing: its viewers get a new stream (or a reset)."""
+        self.live_enhanced.source_changed(running)
+
+    def enhance_status(self) -> dict[str, Any]:
+        fx = self.settings["enhance"]
+        return {"settings": fx, "live": self.stage.status(), "capabilities": self.enhancer.capabilities(int(fx["gpu"])),
+                "last_benchmark": self.enhancer.last_benchmark,
+                "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         before = self.settings.get()
@@ -87,6 +106,8 @@ class Services:
         reopen = any(before[k] != after[k] for k in ("device", "audio_input"))
         if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):
             self.engine.settings_changed(reopen=reopen)
+        if before["enhance"] != after["enhance"]:
+            self.stage.configure()
         if self.config.background:
             if any(before[k] != after[k] for k in HOTKEY_KEYS):
                 self._start_hotkeys()
@@ -97,7 +118,7 @@ class Services:
     def status(self) -> dict[str, Any]:
         cap = self.engine.snapshot()
         return {"capture": cap, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
-                "jobs": self.library.jobs(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
+                "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
                 "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"])}
 

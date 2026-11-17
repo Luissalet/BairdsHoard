@@ -1,6 +1,6 @@
 # Baird's Hoard — what it can and cannot do
 
-App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (27 tools, images as MCP image
+App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (32 tools, images as MCP image
 content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus with *Add* on the discovered app).
 
 ## Can
@@ -16,6 +16,15 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   (real file drag in the Hoard window, `DownloadURL` in a browser tab), copy the file to the Windows clipboard
   (`media_copy`), show in Explorer, rename, light 720p copy for chats (`media_light_copy`, NVENC or x264), delete to
   the Recycle Bin (`media_delete`, confirm=true).
+- Enhance the picture on a spare GPU (`enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`; the "Mejorar" button in the UI): noise
+  reduction (`light` on the CPU, `medium` and `strong` on the GPU), upscaling ×1.5/×2/×3 (up to 3840 px wide), sharpening 0..1, frame-rate
+  interpolation (`blend` live, `mci` for saved files, target `interpolate_fps`) and HDR10 (saved files only: HEVC Main10, PQ, BT.2020). Each effect has
+  its own setting. While `enabled`, the live view, clips and recordings use the enhanced picture (`record` off keeps them original); screenshots and
+  `screen_look` are always the original; a clip whose span the live chain has not covered yet is made from the original and enhanced with the same chain, so it is as long as asked; the WebSocket accepts `?view=raw`. The chain is ffmpeg: Vulkan filters (libplacebo, `nlmeans_vulkan`) and
+  NVENC on the GPU in `enhance.gpu` (default 2), x264 and CPU filters when Vulkan or NVENC are missing; what was left out and why is in
+  `enhance_status.live.chain.skipped`. `enhance_benchmark` (source `demo`, `live` or a saved video) gives ms per frame of the baseline and of each
+  effect and whether the whole chain fits the frame time. `media_enhance` writes "<name> (mejorado).mp4" as a background job (the original stays); with
+  effects named it uses only those, with none it uses the saved ones.
 - Look at a saved file as an image (`media_look`; a video shows its first frame).
 - Settings (`settings_get` / `settings_set`): capture on/off, optional `capture_always_on`, device, audio input (HDMI/line), screenshot format, clip
   length, memory window, media folder, light-copy size and bitrate.
@@ -45,7 +54,8 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 ## Cannot (by design or by the hardware)
 
 - Change the encoder's bitrate, resolution or frame rate: the GL310 accepts the vendor property but ignores it; the
-  stream is what the device sends (1080p30, ~6–7 Mb/s, key frame every second).
+  stream is what the device sends (1080p30, ~6–7 Mb/s, key frame every second). The enhancement re-encodes its own copy; the device's stream is untouched.
+- Show HDR in the live view (the browser path is SDR H.264) or run `mci` interpolation live (about 400 ms per 720p frame on the CPU; the live chain uses `blend`).
 - Control the other computer (keyboard/mouse): a capture device only receives a picture.
 - Run on anything but Windows (DirectShow/KS capture).
 - Share the device with another program while capture is on (turn capture off in Settings to free it).

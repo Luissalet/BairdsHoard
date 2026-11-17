@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -64,8 +65,21 @@ class Library:
         self.on_new_image: Optional[Any] = None
         self.on_rename: Optional[Any] = None
         self.on_delete: Optional[Any] = None
+        self.enhancer: Optional[Any] = None
+        self.stage: Optional[Any] = None
         config.thumbs_dir.mkdir(parents=True, exist_ok=True)
         config.work_dir.mkdir(parents=True, exist_ok=True)
+
+    def attach_enhancer(self, enhancer: Any, stage: Any) -> None:
+        """The GPU enhancement: ``stage`` is the live chain whose picture clips and recordings use while it is on."""
+        self.enhancer = enhancer
+        self.stage = stage
+        stage.add_listener(self.recorder._on_enhanced)
+
+    def wants_enhanced(self) -> bool:
+        """Whether clips and recordings should come from the enhanced picture (the chain is on and ``record`` is set)."""
+        st = self.stage
+        return bool(st is not None and st.enabled() and self.settings["enhance"]["record"])
 
     # ------------------------------------------------------------------ folder and names
 
@@ -148,7 +162,7 @@ class Library:
         return {"name": path.name, "kind": kind, "path": str(path), "size": st.st_size,
                 "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
                 "width": entry.get("width"), "height": entry.get("height"), "duration": entry.get("duration"),
-                "origin": entry.get("origin", "file"), "audio": entry.get("audio"),
+                "origin": entry.get("origin", "file"), "audio": entry.get("audio"), "enhanced": bool(entry.get("enhanced")),
                 "url": f"/media/{path.name}", "thumb": f"/api/thumb/{path.name}?v={int(st.st_mtime)}"}
 
     def list(self, kind: str = "all", limit: int = 200) -> list[dict[str, Any]]:
@@ -294,24 +308,74 @@ class Library:
             self.engine.wait_for_picture()
             ff = self._need_ffmpeg()
             secs = float(seconds or self.settings["clip_seconds"])
-            kept = self.buffer.seconds_kept()
+            # The enhanced picture is used as it was shown when it already covers the span; otherwise the original
+            # span is saved and put through the same chain (below), so the clip is as long as asked either way.
+            source, enhanced, enhance_after = self.buffer, False, self.wants_enhanced()
+            if enhance_after and self.stage.buffer.seconds_kept() >= 0.9 * min(secs, self.buffer.seconds_kept()):
+                source, enhanced, enhance_after = self.stage.buffer, True, False
+            kept = source.seconds_kept()
             if secs > self.settings["buffer_seconds"]:
                 raise BairdError("invalid", f"At most {self.settings['buffer_seconds']} s are kept in memory.",
                                  "Raise buffer_seconds in the settings for longer clips, or record.")
-            parts = self.buffer.since(secs)
+            parts = source.since(secs)
         if not parts:
             raise BairdError("no_signal", "Nothing is in memory yet.")
         tmp = self.config.work_dir / f"clip-{uuid.uuid4().hex[:8]}.ts"
         tmp.write_bytes(b"".join(parts))
         out = self._new_path("Clip", ".mp4", f" ({int(round(min(secs, kept)))} s)")
+        raw = self.config.work_dir / f"clip-{tmp.stem[5:]}-raw.mp4" if enhance_after else out
         try:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp), "-map", "0:v:0",
-                              "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(out)], timeout=120)
-            if proc.returncode != 0 or not out.is_file():
+                              "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(raw)], timeout=120)
+            if proc.returncode != 0 or not raw.is_file():
+                raw.unlink(missing_ok=True)
                 raise BairdError("failed", "Could not write the clip.", proc.stderr.decode("utf-8", "replace")[-300:])
         finally:
             tmp.unlink(missing_ok=True)
-        return self._remember(out, origin="clip", **self._probe(out), probed=True)
+        if enhance_after:
+            try:
+                fx = dict(self.settings["enhance"], hdr=False)  # a clip is shown anywhere: SDR
+                self.enhancer.enhance_file(raw, out, fx)
+                enhanced = True
+                raw.unlink(missing_ok=True)
+            except BairdError as exc:
+                log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
+                os.replace(raw, out)
+        return self._remember(out, origin="clip", enhanced=True if enhanced else None, **self._probe(out), probed=True)
+
+    def enhance_copy(self, name: str, fx: dict[str, Any]) -> dict[str, Any]:
+        """Start an enhanced copy of a video next to it (background job, the original stays as it is); returns the job."""
+        src = self.path_of(name)
+        if src.suffix.lower() not in VIDEO_EXT:
+            raise BairdError("invalid", "Only videos can be enhanced.")
+        if self.enhancer is None:
+            raise BairdError("unavailable", "The enhancement is not available.")
+        with self._lock:
+            taken = {j["target"] for j in self._jobs.values() if j["state"] == "running"}
+            out = src.with_name(f"{src.stem} (mejorado).mp4")
+            n = 2
+            while out.exists() or out.name in taken:
+                out = src.with_name(f"{src.stem} (mejorado {n}).mp4")
+                n += 1
+            job = {"id": uuid.uuid4().hex[:10], "kind": "enhance", "source": src.name, "target": out.name, "state": "running",
+                   "started": time.time(), "message": "", "progress": 0.0}
+            self._jobs[job["id"]] = job
+        work_file = self.config.work_dir / f"enhance-{job['id']}.mp4"   # the library only ever sees the finished file
+
+        def work() -> None:
+            try:
+                result = self.enhancer.enhance_file(src, work_file, fx, progress=lambda x: job.update(progress=round(x, 3)))
+                shutil.move(str(work_file), str(out))
+                self._remember(out, origin="enhanced", enhanced=True, **self._probe(out), probed=True)
+                job.update(state="done", finished=time.time(), progress=1.0, result=result)
+            except BairdError as exc:
+                job.update(state="failed", finished=time.time(), message=f"{exc.message} {exc.hint}".strip())
+            except Exception as exc:  # noqa: BLE001
+                log.exception("enhancing %s", src.name)
+                job.update(state="failed", finished=time.time(), message=str(exc)[:300])
+
+        threading.Thread(target=work, name="baird-enhance", daemon=True).start()
+        return dict(job)
 
     def light_copy(self, name: str) -> dict[str, Any]:
         """Start a smaller copy of a video for chats (background job); returns the job."""
@@ -439,6 +503,7 @@ class Recorder:
         self.last: Optional[dict[str, Any]] = None
         self.state = "idle"            # idle | recording | finishing
         self.message = ""
+        self._enhanced = False         # the file is being written from the enhanced picture
         lib.engine.add_listener(self._on_data)
 
     def is_writing(self, path: Path) -> bool:
@@ -455,6 +520,11 @@ class Recorder:
     def start(self) -> dict[str, Any]:
         with self.lib.engine.request():
             self.lib.engine.wait_for_picture()
+            use_enhanced, note = False, ""
+            if self.lib.wants_enhanced():
+                use_enhanced = self.lib.stage.wait_flowing(12.0)
+                if not use_enhanced:
+                    note = "La mejora no estaba lista: se graba la señal original."
             with self._lock:
                 if self.state == "recording":
                     raise BairdError("busy", "Already recording.", "record_stop ends it.")
@@ -462,7 +532,8 @@ class Recorder:
                     raise BairdError("busy", "The previous recording is still being written; try again in a moment.")
                 self.lib.engine.require_picture()
                 self.lib._need_ffmpeg()
-                head, self._from = self.lib.buffer.tail()
+                self._enhanced = use_enhanced
+                head, self._from = (self.lib.stage.buffer if use_enhanced else self.lib.buffer).tail()
                 self._tmp = self.lib.config.work_dir / f"rec-{uuid.uuid4().hex[:8]}.ts"
                 self._target = self.lib._new_path("Grabación", ".mp4")
                 self._file = open(self._tmp, "wb")
@@ -470,10 +541,18 @@ class Recorder:
                 self._bytes = len(head)
                 self._started = time.time()
                 self.lib.engine.set_demand("recording", True)
-                self.state, self.message = "recording", ""
+                self.state, self.message = "recording", note
                 return self.status()
 
     def _on_data(self, aligned: bytes, starts: list[int], end_total: int) -> None:
+        if not self._enhanced:
+            self._write(aligned, end_total)
+
+    def _on_enhanced(self, aligned: bytes, starts: list[int], end_total: int) -> None:
+        if self._enhanced:
+            self._write(aligned, end_total)
+
+    def _write(self, aligned: bytes, end_total: int) -> None:
         with self._lock:
             if self.state != "recording" or self._file is None or end_total <= self._from:
                 return
@@ -499,7 +578,7 @@ class Recorder:
             return self.status()
 
     def _finish_locked(self) -> None:
-        f, tmp, target = self._file, self._tmp, self._target
+        f, tmp, target, enhanced = self._file, self._tmp, self._target, self._enhanced
         self._file = None
         if f:
             f.close()
@@ -517,7 +596,8 @@ class Recorder:
                 if proc.returncode == 0 and target is not None and target.is_file():
                     with self._lock:
                         self._target = None
-                    result = self.lib._remember(target, origin="recording", **self.lib._probe(target), probed=True)
+                    result = self.lib._remember(target, origin="recording", enhanced=True if enhanced else None,
+                                                **self.lib._probe(target), probed=True)
                     if tmp:
                         tmp.unlink(missing_ok=True)
                 else:

@@ -272,10 +272,13 @@ def ui_call(request: Request, body: CallBody):
 @router.websocket("/api/live")
 async def live(ws: WebSocket):
     """Fragmented MP4 of the live picture: a JSON ``init`` message with the MIME type, then binary init segment and
-    fragments. ``{"type":"reset"}`` means a new stream follows (start a new MediaSource)."""
+    fragments. ``{"type":"reset"}`` means a new stream follows (start a new MediaSource). ``?view=raw`` always shows
+    the original; otherwise the enhanced picture is shown while the enhancement is on (``/api/status`` says which)."""
     await ws.accept()
     svc = ws.app.state.services
-    viewer = await run_in_threadpool(svc.live.attach, asyncio.get_running_loop())
+    enhanced = ws.query_params.get("view") != "raw" and svc.stage.enabled()
+    remux = svc.live_enhanced if enhanced else svc.live
+    viewer = await run_in_threadpool(remux.attach, asyncio.get_running_loop())
 
     async def pump_in() -> None:
         try:
@@ -298,7 +301,7 @@ async def live(ws: WebSocket):
         pass
     finally:
         reader.cancel()
-        svc.live.detach(viewer)
+        remux.detach(viewer)
         try:
             await ws.close()
         except (RuntimeError, WebSocketDisconnect):

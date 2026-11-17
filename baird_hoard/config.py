@@ -13,6 +13,7 @@ from . import APP_ID, DEFAULT_PORT
 from .hoard_link.appconfig import AppPaths, env_flag, env_int, env_str
 from .hoard_link.atomic import read_json, write_json_atomic
 from .hoard_link.guard import parse_allowed_hosts
+from .enhance import DEFAULT_ENHANCE, normalize_enhance
 from .hotkeys import normalize_hotkey
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -38,6 +39,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hotkeys_enabled": True,     # global shortcuts, also when another window has the focus
     "hotkey_shot": "ctrl+alt+c",
     "hotkey_clip": "ctrl+alt+x",
+    "enhance": DEFAULT_ENHANCE,  # GPU enhancement of the picture: effects, where it applies, which GPU (enhance.py)
 }
 
 SNAPSHOT_FORMATS = ("png", "jpg")
@@ -51,6 +53,7 @@ class Config:
     allowed_hosts: tuple[str, ...] = ()
     data_dir_configured: bool = False
     fake: bool = False              # demo/tests: a synthetic source instead of the device
+    fake_source: str = ""           # with ``fake``: loop this video file instead of the test pattern
     background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
 
     @property
@@ -86,6 +89,7 @@ class Config:
             allowed_hosts=tuple(parse_allowed_hosts(os.environ.get("BAIRD_ALLOWED_HOSTS", ""))),
             data_dir_configured=bool(data_env),
             fake=env_flag("BAIRD_FAKE"),
+            fake_source=env_str("BAIRD_FAKE_SOURCE") or "",
         )
 
 
@@ -128,7 +132,7 @@ class Settings:
                     raise ValueError(f"Unknown setting: {key}")
                 if value is None:
                     continue
-                data[key] = value
+                data[key] = normalize_enhance(value, data[key]) if key == "enhance" else value
             data = normalize(data)
             self._data = data
             write_json_atomic(self.path, data)
@@ -151,6 +155,7 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     data["light_kbps"] = int(min(max(int(data["light_kbps"]), 300), 20000))
     data["ocr_auto"] = bool(data["ocr_auto"])
     data["hotkeys_enabled"] = bool(data["hotkeys_enabled"])
+    data["enhance"] = normalize_enhance(data.get("enhance"))
     for key in ("hotkey_shot", "hotkey_clip"):
         try:
             data[key] = normalize_hotkey(data[key])
