@@ -16,7 +16,7 @@ Baird's Hoard turns an HDMI capture device into a tool for working with another 
 
 | | |
 |---|---|
-| **Live view** | The other computer's screen in a window, 1080p, with sound, under a second of delay. The device's own H.264/AAC is copied into fragmented MP4 and played by the browser's hardware decoder: no re-encoding, almost no CPU. |
+| **Live view** | The other computer's screen in a window, 1080p, with sound, under a second of delay. A level meter beside the speaker button moves with the captured sound even while muted and says when nothing arrives. The device's own H.264/AAC is copied into fragmented MP4 and played by the browser's hardware decoder: no re-encoding, almost no CPU. |
 | **Enhance** | Optional GPU chain between the signal and what you see and save, one switch per effect: noise reduction, upscaling (×1.5, ×2, ×3), sharpening, frame-rate interpolation (blend for the live view, motion-compensated for saved files) and HDR10 for saved files. Clips and recordings come from the enhanced picture while it is on; screenshots and `screen_look` stay the original. The effects run on Vulkan (libplacebo, `nlmeans_vulkan`) and NVENC on one chosen GPU, with CPU fallbacks; **Measure cost** reports the milliseconds each effect adds per frame and whether the chain keeps up in real time. A saved video gets an enhanced "(mejorado)" copy from its card. |
 | **Screenshot** (`C`) | The exact current frame as PNG (or JPG), saved in a tenth of a second. |
 | **Last seconds** (`B`) | The last 30 s (configurable, up to the memory window) saved as MP4 instantly: the app keeps the recent past in memory, cut on key frames. |
@@ -68,7 +68,7 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 ## Settings
 
-Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or line in), screenshot format,
+Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
 shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default).
 
