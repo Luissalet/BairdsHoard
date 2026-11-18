@@ -82,6 +82,8 @@ kbd {
 
 .controls { flex: none; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .controls .spacer { flex: 1; }
+.rec-control { display: flex; align-items: center; gap: 10px; }
+.rec-timer { font: 600 15px var(--hoard-font-mono); font-variant-numeric: tabular-nums; }
 .meta { color: var(--hoard-text-dim); font-size: 13px; font-family: var(--hoard-font-mono); }
 
 /* ---------------------------------------------------------------- side list */

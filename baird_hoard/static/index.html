@@ -44,7 +44,10 @@
         <button class="btn primary big" id="btn-shot" title="Captura (C)"><span class="ico">◉</span> Captura <kbd>C</kbd></button>
         <button class="btn big" id="btn-zone" title="Capturar solo una zona: arrastra un rectángulo sobre el directo (Z)"><span class="ico">▢</span> Zona <kbd>Z</kbd></button>
         <button class="btn big" id="btn-clip" title="Guardar los últimos segundos (B)"><span class="ico">⟲</span> <span id="clip-label">Últimos 30 s</span> <kbd>B</kbd></button>
-        <button class="btn big" id="btn-rec" title="Grabar (R)"><span class="ico rec-ico">●</span> <span id="rec-label">Grabar</span> <kbd>R</kbd></button>
+        <div class="rec-control">
+          <button class="btn big" id="btn-rec" title="Grabar (R)"><span class="ico rec-ico">●</span> <span id="rec-label">Grabar</span> <kbd>R</kbd></button>
+          <span class="rec-timer" id="rec-timer" role="timer" aria-label="Tiempo de grabación" title="Tiempo de grabación" hidden>00:00</span>
+        </div>
         <span class="spacer"></span>
         <span class="meta" id="meta"></span>
         <button class="btn icon" id="btn-pip" title="Vista mini siempre encima (P)">⧉</button>

@@ -249,7 +249,15 @@ async function refreshStatus() {
   $('btn-rec').classList.toggle('recording', recording);
   $('rec-label').textContent = recording ? 'Parar' : rec.state === 'finishing' ? 'Guardando…' : 'Grabar';
   $('rec-badge').hidden = !recording;
-  if (recording) $('rec-time').textContent = `${fmtDur(rec.seconds)} · ${fmtSize(rec.bytes || 0)}`;
+  const timer = $('rec-timer');
+  timer.hidden = !recording;
+  if (recording) {
+    const seconds = Math.max(0, Math.floor(rec.seconds));
+    const hours = Math.floor(seconds / 3600);
+    const minutesAndSeconds = fmtDur(seconds % 3600).padStart(5, '0');
+    timer.textContent = hours ? `${hours}:${minutesAndSeconds}` : minutesAndSeconds;
+    $('rec-time').textContent = `${timer.textContent} · ${fmtSize(rec.bytes || 0)}`;
+  }
   if (state.recWas === 'finishing' && rec.state === 'idle' && rec.last) {
     if (rec.last.error) toast(`La grabación no se pudo convertir: ${rec.last.error}`, 'err');
     else { toast(`Grabación guardada: ${rec.last.name}`, 'ok'); markFresh(rec.last.name); }
