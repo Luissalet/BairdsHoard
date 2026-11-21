@@ -29,7 +29,7 @@ class Services:
     def __init__(self, config: Config):
         self.config = config
         config.paths.ensure()
-        self.settings = Settings(config.settings_path)
+        self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
         self.token = read_or_create_token(config.token_path)
         self.ffmpeg = ffmpeg_path()
         self.ffprobe = ffprobe_path(self.ffmpeg)

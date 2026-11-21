@@ -110,6 +110,8 @@ This app carries procedures from the skill library of the family's workspace for
 | `GET/PUT /api/settings`, `GET /api/devices` | settings (`enhance` is an object; a partial update keeps the other keys) |
 | `WS /api/live` | live fragmented MP4 (`init` JSON, init segment, fragments; `reset` starts a new stream); the enhanced picture while the enhancement is on, `?view=raw` for the original |
 
+An isolated Hub profile starts with an empty media folder under its data directory. Capture and global shortcuts default to off, and background watchers stay off in this profile.
+
 ## Tests
 
 ```

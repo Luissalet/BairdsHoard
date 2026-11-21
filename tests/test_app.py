@@ -36,6 +36,37 @@ def client(tmp_path):
         yield c
 
 
+def test_isolated_profile_keeps_media_private(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from baird_hoard import config
+    from baird_hoard.main import create_app
+
+    ordinary = tmp_path / "ordinary-media"
+    ordinary.mkdir()
+    (ordinary / "existing.png").write_bytes(b"existing screenshot")
+    monkeypatch.setattr(config, "default_media_dir", lambda: str(ordinary))
+    monkeypatch.setenv("BAIRD_DATA_DIR", str(tmp_path / "isolated"))
+    monkeypatch.setenv("BAIRD_ISOLATED_INSTANCE", "1")
+    monkeypatch.setenv("BAIRD_PORT", "5232")
+    app = create_app()
+
+    with TestClient(app, base_url="http://127.0.0.1:5232", client=("127.0.0.1", 50000)) as isolated:
+        assert isolated.get("/api/media").json()["items"] == []
+        settings = isolated.get("/api/settings").json()
+        assert settings["media_dir_effective"] == str(tmp_path / "isolated" / "media")
+        assert settings["capture_enabled"] is False
+        assert settings["hotkeys_enabled"] is False
+        assert isolated.get("/api/health").json()["capture"] == "off"
+        assert not app.state.config.background
+
+    monkeypatch.delenv("BAIRD_ISOLATED_INSTANCE")
+    normal = config.Config.from_env()
+    settings = config.Settings(normal.settings_path)
+    assert normal.background and settings["capture_enabled"] and settings["hotkeys_enabled"]
+    assert settings.media_dir() == str(ordinary)
+
+
 def test_health(client):
     body = client.get("/api/health").json()
     assert body["service"] == "bairds-hoard" and body["capture"] == "running"

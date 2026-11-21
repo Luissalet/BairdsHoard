@@ -16,6 +16,11 @@
     "avermedia-lgp"
   ],
   "x-family": {
+    "isolated_instance": {
+      "data_env": "BAIRD_DATA_DIR",
+      "port_env": "BAIRD_PORT",
+      "env": {"BAIRD_ISOLATED_INSTANCE": "1"}
+    },
     "copilot": true,
     "auto_start": false
   },
