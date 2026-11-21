@@ -7,6 +7,7 @@ import json
 import subprocess
 import time
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -209,7 +210,7 @@ def test_the_tools_exist_and_status_starts_off(env):
     assert agent(env, "enhance_set", upscale=2.5).status_code == 400                      # not a factor the chain has
 
 
-def test_live_view_clips_and_recordings_use_the_enhanced_picture(env):
+def test_live_view_clips_and_recordings_use_the_enhanced_picture(env, monkeypatch):
     svc = env.app.state.services
     assert agent(env, "enhance_set", enabled=True, upscale=2, denoise="light").json()["settings"]["upscale"] == 2.0
     wait_for(lambda: svc.stage.flowing)
@@ -220,10 +221,39 @@ def test_live_view_clips_and_recordings_use_the_enhanced_picture(env):
     wait_for(lambda: svc.stage.buffer.seconds_kept() >= 3.0)
     clip = agent(env, "clip_save", seconds=3).json()
     assert clip["enhanced"] is True and (clip["width"], clip["height"]) == (2560, 1440)
-    assert agent(env, "record_start").json()["state"] == "recording"
-    time.sleep(3)
-    agent(env, "record_stop")
-    rec = wait_for(lambda: next((i for i in agent(env, "media_list", kind="video").json()["items"] if i["origin"] == "recording"), None))
+    started = agent(env, "record_start").json()
+    assert started["state"] == "recording"
+    min_frames = svc.stage.status()["frames"] + 90
+    wait_for(lambda: svc.stage.status()["frames"] >= min_frames)
+
+    probing, finish_probe = Event(), Event()
+    probe_media = svc.library._probe
+
+    def pause_recording_probe(path):
+        if path.name == started["target"] and not probing.is_set():
+            probing.set()
+            assert finish_probe.wait(40), "the test never released the recording probe"
+        return probe_media(path)
+
+    monkeypatch.setattr(svc.library, "_probe", pause_recording_probe)
+    try:
+        stopped = agent(env, "record_stop")
+        assert stopped.is_success, stopped.text
+        assert probing.wait(40), svc.library.recorder.status()
+        items = agent(env, "media_list", kind="video").json()["items"]
+        assert started["target"] not in {item["name"] for item in items}
+    finally:
+        finish_probe.set()
+
+    def completed_recording():
+        status = env.get("/api/status").json()["recording"]
+        return status["last"] if status["state"] == "idle" else None
+
+    last = wait_for(completed_recording)
+    assert "error" not in last, last
+    items = agent(env, "media_list", kind="video").json()["items"]
+    rec = next(item for item in items if item["name"] == started["target"])
+    assert rec["origin"] == "recording"
     assert rec["enhanced"] is True and (rec["width"], rec["height"]) == (2560, 1440)
     # screenshots and screen_look stay the original picture
     assert agent(env, "snapshot_save").json()["width"] == 1280
