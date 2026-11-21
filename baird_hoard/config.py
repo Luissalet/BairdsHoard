@@ -55,6 +55,7 @@ class Config:
     fake: bool = False              # demo/tests: a synthetic source instead of the device
     fake_source: str = ""           # with ``fake``: loop this video file instead of the test pattern
     background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
+    isolated_instance: bool = False
 
     @property
     def paths(self) -> AppPaths:
@@ -83,6 +84,7 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         data_env = env_str("BAIRD_DATA_DIR")
+        isolated_instance = bool(data_env) and env_flag("BAIRD_ISOLATED_INSTANCE")
         return cls(
             data_dir=Path(data_env).expanduser() if data_env else REPO_ROOT / "data",
             port=env_int("BAIRD_PORT", default=DEFAULT_PORT) or DEFAULT_PORT,
@@ -90,20 +92,25 @@ class Config:
             data_dir_configured=bool(data_env),
             fake=env_flag("BAIRD_FAKE"),
             fake_source=env_str("BAIRD_FAKE_SOURCE") or "",
+            background=not isolated_instance,
+            isolated_instance=isolated_instance,
         )
 
 
 class Settings:
     """Thread-safe JSON settings with defaults; ``update`` validates and writes atomically."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, isolated_instance: bool = False):
         self.path = path
+        self._isolated_instance = isolated_instance
         self._lock = threading.RLock()
         self._data = self._load()
 
     def _load(self) -> dict[str, Any]:
         raw = read_json(self.path, default={}) or {}
         data = copy.deepcopy(DEFAULT_SETTINGS)
+        if self._isolated_instance:
+            data.update(capture_enabled=False, hotkeys_enabled=False)
         if isinstance(raw, dict):
             data.update({k: v for k, v in raw.items() if k in DEFAULT_SETTINGS})
         return normalize(data)
@@ -120,7 +127,9 @@ class Settings:
 
     def media_dir(self) -> str:
         with self._lock:
-            return self._data["media_dir"] or default_media_dir()
+            if self._data["media_dir"]:
+                return self._data["media_dir"]
+            return str(self.path.parent / "media") if self._isolated_instance else default_media_dir()
 
     def update(self, changes: dict[str, Any]) -> dict[str, Any]:
         with self._lock:

@@ -96,6 +96,8 @@ La app lleva además procedimientos de la biblioteca de skills de la familia par
 | `GET/PUT /api/settings`, `GET /api/devices` | ajustes |
 | `WS /api/live` | MP4 fragmentado en directo (`init` JSON, segmento de inicio, fragmentos; `reset` empieza un flujo nuevo) |
 
+Un perfil aislado del Hub arranca con una carpeta de medios vacía dentro de sus datos. La captura y los atajos globales vienen desactivados, y la vigilancia en segundo plano permanece parada en ese perfil.
+
 ## Pruebas
 
 ```
