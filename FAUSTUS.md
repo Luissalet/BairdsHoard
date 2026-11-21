@@ -11,7 +11,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   to the assistant; `save=false` leaves no file).
 - Save the last N seconds (default 30, up to the memory window of 10–600 s) as MP4 instantly — `B`, `clip_save`.
 - Record picture and sound until stopped — `R`, `record_start` / `record_stop`; a recording stops by itself, keeping
-  what was recorded, when the picture is lost.
+  what was recorded, when the picture is lost. `media_list` shows the MP4 once finalization has saved its recording metadata.
 - Library of screenshots, clips and recordings (`media_list`, newest first, with absolute paths): drag a card out
   (real file drag in the Hoard window, `DownloadURL` in a browser tab), copy the file to the Windows clipboard
   (`media_copy`), show in Explorer, rename, light 720p copy for chats (`media_light_copy`, NVENC or x264), delete to
