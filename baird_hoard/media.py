@@ -594,8 +594,7 @@ class Recorder:
                                       "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(target)],
                                      timeout=3600)
                 if proc.returncode == 0 and target is not None and target.is_file():
-                    with self._lock:
-                        self._target = None
+                    # Keep the file out of library scans until its recording metadata is saved.
                     result = self.lib._remember(target, origin="recording", enhanced=True if enhanced else None,
                                                 **self.lib._probe(target), probed=True)
                     if tmp:
