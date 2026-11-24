@@ -258,19 +258,42 @@ class Library:
                 return proc.stdout
         raise BairdError("failed", "Could not decode the picture.")
 
-    def grab_file(self, region: Optional[dict[str, Any]], dest: Path) -> Path:
-        """The newest picture (or ``region``) as a PNG at ``dest``, outside the library (OCR input)."""
+    def grab_file(self, region: Optional[dict[str, Any]], dest: Path, *, scale: float = 1.0) -> Path:
+        """The newest picture (or ``region``) as a PNG at ``dest`` (a BMP when ``dest`` ends in ``.bmp``: quicker to
+        write), outside the library (OCR input). ``scale`` enlarges it first: small text reads better at twice the size."""
         ff = self._need_ffmpeg()
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
         region = parse_region(region, self.input_size())
+        grow = f",scale=iw*{scale:g}:ih*{scale:g}:flags=lanczos" if scale != 1 else ""
+        codec = "bmp" if dest.suffix.lower() == ".bmp" else "png"
         for index in (max(0, frames - 2), 0):
-            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
+            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "") + grow
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
-                              "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", "png", str(dest)], data=data, timeout=20)
+                              "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", codec, str(dest)], data=data, timeout=20)
             if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
                 return dest
+        raise BairdError("failed", "Could not decode the picture.")
+
+    def grab_jpeg(self, region: Optional[dict[str, Any]] = None, max_side: int = 1024, quality: int = 4) -> tuple[bytes, int, int]:
+        """The newest picture (or ``region``) as JPEG bytes no larger than ``max_side``, with its width and height.
+        Nothing is written to disk or to the library: this is what a guiding assistant looks at."""
+        ff = self._need_ffmpeg()
+        data, frames = self.buffer.latest()
+        if not data:
+            raise BairdError("no_signal", "No picture has arrived yet.")
+        region = parse_region(region, self.input_size())
+        fit = f"scale='min({int(max_side)},iw)':'min({int(max_side)},ih)':force_original_aspect_ratio=decrease"
+        for index in (max(0, frames - 2), 0):
+            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "") + "," + fit
+            proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
+                              "-fps_mode", "passthrough", "-frames:v", "1", "-q:v", str(int(quality)), "-f", "image2", "-c:v", "mjpeg",
+                              "pipe:1"], data=data, timeout=20)
+            if proc.returncode == 0 and proc.stdout:
+                width, height = jpeg_size(proc.stdout)
+                if width and height:
+                    return proc.stdout, width, height
         raise BairdError("failed", "Could not decode the picture.")
 
     def save_annotated(self, name: str, png: bytes) -> dict[str, Any]:
@@ -613,6 +636,21 @@ class Recorder:
                 self.state = "idle"
 
         threading.Thread(target=work, name="baird-record-finish", daemon=True).start()
+
+
+def jpeg_size(data: bytes) -> tuple[int, int]:
+    """Width and height from a JPEG's frame header; ``(0, 0)`` when it has none."""
+    i, n = 2, len(data)
+    while i + 9 < n and data[i] == 0xFF:
+        marker = data[i + 1]
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        size = int.from_bytes(data[i + 2:i + 4], "big")
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + size
+    return 0, 0
 
 
 def send_to_recycle_bin(path: Path) -> bool:

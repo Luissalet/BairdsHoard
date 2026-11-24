@@ -1,5 +1,5 @@
 """Everything the app runs, built once per process: settings, the in-memory past, the capture engine, the live view,
-the library, the text index (OCR), the screen watcher, the global-shortcut helper and the agent token."""
+the library, the text index (OCR), the screen watcher, the global-shortcut helper, the copilot and the agent token."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from typing import Any
 from . import __version__
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .config import Config, Settings
+from .copilot import Copilot
 from .enhance import EnhanceStage, Enhancer, StageSource
 from .hoard_link import fam_notify, family
 from .hoard_link.tokens import read_or_create_token
@@ -17,6 +18,7 @@ from .hotkeys import HotkeyHelper
 from .live import LiveRemux
 from .media import Library
 from .ocr import OcrIndex
+from .textmap import TextReader
 from .tsbuf import TsBuffer
 from .watch import WatchEngine
 
@@ -51,6 +53,8 @@ class Services:
                                  ocr_fn=lambda path: self.ocr.ocr_fn(path), notify_fn=self._notify, emit_fn=family.emit,
                                  on_demand=lambda active: self.engine.set_demand("watch", active))
         self.hotkeys = HotkeyHelper(config.data_dir / "hotkeys-status.json", config.port)
+        self.copilot = Copilot(engine=self.engine, library=self.library, settings=self.settings, reader=TextReader(),
+                               ffmpeg=self.ffmpeg, work_dir=config.work_dir)
         self.started = time.time()
 
     def start(self) -> None:
@@ -61,6 +65,7 @@ class Services:
             self._start_hotkeys()
 
     def stop(self) -> None:
+        self.copilot.close()
         if self.library.recorder.state == "recording":
             try:
                 self.library.recorder.stop()
@@ -88,6 +93,7 @@ class Services:
         self.stage.raw_state(state == "running")
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
+            self.copilot.source_changed(state == "running")
 
     def _on_stage(self, running: bool) -> None:
         """The enhanced picture started or stopped flowing: its viewers get a new stream (or a reset)."""
@@ -108,6 +114,8 @@ class Services:
             self.engine.settings_changed(reopen=reopen)
         if before["enhance"] != after["enhance"]:
             self.stage.configure()
+        if before["copilot"] != after["copilot"]:
+            self.copilot.settings_changed()
         if self.config.background:
             if any(before[k] != after[k] for k in HOTKEY_KEYS):
                 self._start_hotkeys()
@@ -120,7 +128,8 @@ class Services:
         return {"capture": cap, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
                 "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
-                "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"])}
+                "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"]),
+                "copilot": self.copilot.status()}
 
     def health(self) -> dict[str, Any]:
         cap = self.engine.snapshot()

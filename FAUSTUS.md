@@ -1,6 +1,6 @@
 # Baird's Hoard — what it can and cannot do
 
-App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (32 tools, images as MCP image
+App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (38 tools, images as MCP image
 content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus with *Add* on the discovered app).
 
 ## Can
@@ -39,6 +39,21 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Watch the screen and alert (`watch_*`, "Vigilar" button): rules "something changes in a zone" (threshold %, or
   stays still N s) or "text appears/disappears" (OCR). An alert saves an "Aviso" capture, emits `baird.watch` on the
   family bus and sends a Hub notification.
+- Guide the person live on the other computer's screen, copilot mode (`copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find`,
+  `copilot_status`, `copilot_stop`; the same over HTTP under `/copilot`, and `GET /copilot` is the page an assistant reads to start: what
+  it is, where things stand, how to drive it). `copilot_show` takes steps: `say` (the subtitle under the picture), `hint`, and marks drawn
+  over the live picture: `click` / `dbl` / `right` (a red dot), `type` (the text to type, at its field), `keys`, `box`, `arrow` (a drag),
+  `note`. A place is coordinates of the last `copilot_look` or a text on screen (`"click": "Guardar"`, `{"find", "nth", "near", "side",
+  "dx", "dy"}`): Baird finds it with the OCR of Windows on this PC, follows it when the page scrolls, shows it when it comes on screen
+  and says when the same text is there twice (`several_on_screen`) or never comes (`anchor_missing`). Baird ends each step by itself
+  (`until`: `auto` = the screen changes around the mark or anywhere but a notification corner, or the typed text shows up; `manual`;
+  `{"text"}`, `{"gone"}`, `{"after"}`, `{"change": [x, y, w, h]}`), so one call shows a whole plan and waits (`wait_s`); it answers with
+  the events (advanced, done, help, say, stalled, anchor_missing, stopped) and the picture when eyes are needed. `message` is the
+  assistant talking in the conversation beside the picture; the person answers there (event `say`), presses Hecho / Atrás / Ayuda /
+  Parar, and can have it all read aloud. `copilot_look` returns a small picture (1024 px by default, `region` zooms, `text=true` lists
+  every text with its place, `image=false` only the list) and saves nothing. Text that arrives garbled from a Windows console is put
+  right. A session nobody touches ends after `copilot.idle_minutes` (15); `copilot.enabled` (the switch in the Copilot button) turns it
+  all off.
 - Always-on-top mini view (button / key `P`, browser Picture-in-Picture).
 - Global shortcuts for capture (default Ctrl+Alt+C) and clip (Ctrl+Alt+X) even without focus, configurable in
   Settings (`hotkeys_status`). A small helper process registers them with Windows and dies with the app.
@@ -56,14 +71,20 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Change the encoder's bitrate, resolution or frame rate: the GL310 accepts the vendor property but ignores it; the
   stream is what the device sends (1080p30, ~6–7 Mb/s, key frame every second). The enhancement re-encodes its own copy; the device's stream is untouched.
 - Show HDR in the live view (the browser path is SDR H.264) or run `mci` interpolation live (about 400 ms per 720p frame on the CPU; the live chain uses `blend`).
-- Control the other computer (keyboard/mouse): a capture device only receives a picture.
+- Control the other computer (keyboard/mouse): a capture device only receives a picture. The copilot shows the person what to do; it
+  does not do it.
+- Know that a step is done when doing it changes nothing on screen, or only inside a right-hand corner: the person presses Hecho
+  (Space). A screen that never goes still (a video playing) also leaves every step to the person.
+- Draw the copilot's marks in the mini view (Picture-in-Picture shows only the picture) or read the screen's text off Windows
+  (marks by coordinates still work there).
 - Run on anything but Windows (DirectShow/KS capture).
 - Share the device with another program while capture is on (turn capture off in Settings to free it).
 
 ## Where things are
 
 - Files: `Videos\Baird` (setting `media_dir`). Data: `data/` (settings, media index, thumbnails, logs, `mcp-token`).
-- Native helper: `native/bairdcap.cs` → `bairdcap.exe` (built on first start with the Windows C# compiler).
+- Native helper: `native/bairdcap.cs` → `bairdcap.exe` (built on first start with the Windows C# compiler). Screen text for the
+  copilot: `native/bairdocr.ps1` (Windows PowerShell 5.1 and `Windows.Media.Ocr`; started on first use, stopped when idle).
 - Hardware notes: `docs/DEVICE.md`.
 
 ## Skills for the agents that connect

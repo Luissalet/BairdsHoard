@@ -21,6 +21,7 @@ clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_s
 snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds screenshots by the text they show (read in the background with the family's OCR: Kafka's Hoard); media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
 enhance_set turns the GPU enhancement on and chooses the effects (denoise, upscale, sharpen, interpolate, hdr): the live view, clips and recordings then use the enhanced picture (screen_look and screenshots stay the original). enhance_status shows what it does now and what each effect costs per frame; enhance_benchmark measures that cost on a sample; media_enhance writes an enhanced copy of a saved video.
+Copilot mode guides the person live on that screen: copilot_show draws steps over the live picture (a red dot where to click, boxes, arrows, the text to type, the keys to press) with one short instruction each as a subtitle under it, and Baird moves from step to step by itself by watching the screen, so send the whole plan in one call and let it wait (wait_s); it answers when the plan is done or the person needs you, with the picture. Its message is you talking to the person in the conversation beside the picture, where they can write back (event say). Point at things by the text they show ("click": "Guardar") whenever they have one: no look needed and it follows scrolling. copilot_look is the cheap way to see the screen while guiding (nothing is saved), copilot_find says where a text is, copilot_wait waits for the person, copilot_stop ends the session. You cannot click or type on the other computer: the person does it.
 Pictures of the other computer can show private information of the user: describe only what the task needs."""
 
 
@@ -159,6 +160,54 @@ class EnhanceBenchArgs(EffectArgs):
     source: str = Field("demo", max_length=260, description="demo = a synthetic noisy video (no capture needed), live = the last seconds of the capture, or a video's name from media_list.")
     size: Literal["720p", "1080p"] = Field("720p", description="Picture size of the demo sample.")
     frames: int = Field(150, ge=30, le=600, description="Frames the longer run of each measurement processes (a third of them for the shorter).")
+
+
+class CopilotLookArgs(BaseModel):
+    max_side: Optional[int] = Field(None, ge=320, le=2048, description="Longest side of the picture you get (default 1024); smaller costs you less.")
+    region: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, w, h] in the coordinates of your last look: zoom into that part instead of asking for a bigger picture.")
+    text: bool = Field(False, description="Also list every text on screen as \"x,y text\" (its centre).")
+    image: bool = Field(True, description="false: no picture, only what else was asked (with text=true, the cheapest way to read labels).")
+
+
+class CopilotShowArgs(BaseModel):
+    steps: list[Any] = Field(default_factory=list, max_length=40, description=(
+        "The steps, in order; each is an object (or just a sentence). Fields: say (one short imperative sentence in the person's "
+        "language: the subtitle under the picture), then what to draw: click / dbl / right (a place), type (the text to type, with at = where), keys (\"Ctrl+S\"), "
+        "box (a place to look at), arrow ([from, to], a drag), note (a label, with at), or marks: [...] for several; hint (a second "
+        "line); until (when the step is over: \"auto\" by default = the screen changes where you pointed or the typed text shows up, "
+        "\"manual\", {\"text\": \"...\"} appears, {\"gone\": \"...\"}, {\"after\": seconds}). A place is \"text on screen\" "
+        "(found by OCR; it may not be on screen yet), [x, y], [x, y, w, h] or {\"find\": \"Guardar\", \"nth\": 2, \"side\": "
+        "\"right\", \"dx\": 40}; numbers are pixels of your last copilot_look. Example: [{\"say\": \"Abre Archivo\", \"click\": "
+        "\"Archivo\"}, {\"say\": \"Escribe el nombre\", \"type\": \"informe\", \"at\": {\"find\": \"Nombre\", \"side\": \"right\"}}]."))
+    message: Optional[str] = Field(None, max_length=600, description="You talking to the person: a line in the conversation beside the picture (explain, answer, say what comes next). With or without steps.")
+    agent: Optional[str] = Field(None, max_length=40, description="Your name, shown to the person (first call).")
+    goal: Optional[str] = Field(None, max_length=160, description="What the session is for, shown to the person (first call).")
+    replace: bool = Field(True, description="true: these steps replace the ones not done yet. false: they go after them.")
+    wait_s: float = Field(45, ge=0, le=150, description="Then wait up to this long, like copilot_wait (0 = answer at once).")
+    look: Literal["auto", "always", "never"] = Field("auto", description="Whether the answer brings the picture: auto = when eyes are needed (plan done, help, a missing text).")
+    each: bool = Field(False, description="Also answer after every single step (normally only when you are needed).")
+    space: Optional[list[float]] = Field(None, min_length=2, max_length=2, description="[width, height] your coordinates are measured on, when it is not your last look.")
+
+
+class CopilotWaitArgs(BaseModel):
+    wait_s: float = Field(45, ge=0, le=150, description="Longest wait in seconds.")
+    look: Literal["auto", "always", "never"] = "auto"
+    each: bool = False
+
+
+class CopilotFindArgs(BaseModel):
+    text: str = Field("", max_length=200, description="The text to find; empty lists every text on screen.")
+
+
+class CopilotStopArgs(BaseModel):
+    message: str = Field("", max_length=240, description="A last line for the person (\"Listo\").")
+
+
+def _copilot_show(svc: Services, a: CopilotShowArgs) -> dict[str, Any]:
+    spec: dict[str, Any] = {"steps": a.steps, "message": a.message, "agent": a.agent, "goal": a.goal, "replace": a.replace}
+    if a.space:
+        spec["space"] = a.space
+    return svc.copilot.show(spec, wait_s=a.wait_s, each=a.each, look=a.look)
 
 
 def _fx(svc: Services, a: EffectArgs) -> dict[str, Any]:
@@ -351,6 +400,28 @@ TOOLS: list[Tool] = [
                              "Needs the effects chosen: denoise, upscale, sharpen, interpolate (mci allowed here), hdr (HEVC HDR10). The original is kept.",
                              "mejorar vídeo, superresolución, interpolar fotogramas"),
          EnhanceFileArgs, ann(draft_safe=True), _enhance_file),
+    Tool("copilot_show", _d("Guide the person live: draw steps over the other computer's live picture and wait for them.",
+                            "Starts a copilot session when there is none. Baird goes from step to step by itself (it watches the screen), so send "
+                            "every step you already know in one call. Answers when the plan is done, the person asks for help or writes "
+                            "(events help / say), a text you pointed at is not on screen (anchor_missing), a step takes too long (stalled) or "
+                            "the session ended (stopped); still_waiting=true means nothing happened yet (call copilot_wait). The answer "
+                            "brings the picture when eyes are needed.",
+                            "copilot, modo copilot, guíame, guía en directo, tutorial en vivo, marca dónde pulsar, overlay"),
+         CopilotShowArgs, ann(), _copilot_show, timeout_s=190, capped=False),
+    Tool("copilot_wait", _d("Wait until the person you are guiding needs you (plan done, help, a message, a missing text, the end).",
+                            "Call it again while still_waiting is true; stop after a stopped event."),
+         CopilotWaitArgs, ann(read_only=True), lambda s, a: s.copilot.wait(a.wait_s, each=a.each, look=a.look), timeout_s=190, capped=False),
+    Tool("copilot_look", _d("See the other computer's screen while guiding: a small picture (nothing is saved) and, with text=true, every text on it with its place.",
+                            "Its pixels are the coordinates your next marks are read in. region zooms.", "mirar la pantalla, ver qué hay"),
+         CopilotLookArgs, ann(read_only=True),
+         lambda s, a: s.copilot.look(max_side=a.max_side, region=a.region, text=a.text, image=a.image), timeout_s=45, capped=False),
+    Tool("copilot_find", _d("Where a text is on the other computer's screen right now (no picture), or every text when none is named.",
+                            "Coordinates are in the pixels of your last look. Use it to check a label before pointing at it."),
+         CopilotFindArgs, ann(read_only=True), lambda s, a: s.copilot.texts(a.text), timeout_s=45),
+    Tool("copilot_status", _d("Where the copilot session is: step, what it is waiting for, texts it is still looking for."), Empty,
+         ann(read_only=True), lambda s, a: s.copilot.status()),
+    Tool("copilot_stop", _d("End the copilot session and clear the marks; message is a last line for the person."),
+         CopilotStopArgs, ann(idempotent=True), lambda s, a: s.copilot.stop(a.message)),
     Tool("jobs_list", _d("Background jobs (light copies, enhanced copies) and their state."), Empty, ann(read_only=True),
          lambda s, a: {"jobs": s.library.jobs()}),
     Tool("settings_get", _d("Current settings (clip length, memory, folder, screenshot format, audio input)."), Empty,

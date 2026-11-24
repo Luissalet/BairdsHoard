@@ -10,7 +10,7 @@ Part of the Hoard family (Hoard Hub, Faustus). Runs locally on Windows, port **5
 
 ## What it is
 
-Baird's Hoard turns an HDMI capture device into a tool for working with another computer's screen: you watch it live, optionally enhance the picture on a spare GPU, grab screenshots, keep the last seconds, record, annotate, search the text on captured screens and watch for changes. Every file is ready to drag into a chat, and assistants get the same abilities through MCP.
+Baird's Hoard turns an HDMI capture device into a tool for working with another computer's screen: you watch it live, optionally enhance the picture on a spare GPU, grab screenshots, keep the last seconds, record, annotate, search the text on captured screens and watch for changes. Every file is ready to drag into a chat, and assistants get the same abilities through MCP. In copilot mode an assistant guides you live on that screen: it marks where to click and what to type on top of the picture, tells you what to do under it and moves on by itself as you go.
 
 ## What it does
 
@@ -28,10 +28,11 @@ Baird's Hoard turns an HDMI capture device into a tool for working with another 
 | **Search by text** | Screenshots are read in the background (OCR through the Hub and Kafka); the search bar finds them by the words on screen. |
 | **Watch** | Rules that alert when a zone changes (or stays still) or when text appears/disappears; an alert saves a picture, emits `baird.watch` on the family bus and notifies through the Hub. |
 | **Mini view** (`P`) | Always-on-top Picture-in-Picture window to keep an eye on the other computer. |
+| **Copilot** | An assistant guides you live while you keep working on the other computer. It draws on top of the live picture: a red dot where to click, boxes, arrows for a drag, the text to type next to its field, the keys to press. The instruction of each step is a subtitle under the picture (inside it in full screen), and a conversation beside it is where the assistant talks to you and you answer; a switch reads it all aloud. Baird goes to the next step by itself: it watches the picture and reads its text (the OCR that ships with Windows, on this PC), so the assistant is only called when a plan ends or you press **Ayuda**. A mark can name the text it points at (`"click": "Guardar"`): Baird finds it, follows it when the page scrolls and shows it as soon as it is on screen, so a whole plan can be sent at once. The **Copilot** button in the top bar copies the address to hand to any chat, `http://127.0.0.1:5232/copilot`: the assistant reads there how to use it and starts. |
 | **Global shortcuts** | Ctrl+Alt+C (screenshot) and Ctrl+Alt+X (last seconds) even when Baird is not focused; configurable in Settings. A small helper registers them with Windows and ends with the app. |
-| **Assistants** | 32 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
+| **Assistants** | 38 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find` guide the person live; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
 
-Other keys: `M` sound, `F` full screen (double click on the picture also).
+Other keys: `M` sound, `F` full screen (double click on the picture also). While a copilot guides: `Space` (or `Enter`, `→`) step done, `←` back, `H` help.
 
 If the device's driver stops responding (it can happen when the other computer goes to sleep), the status shows
 **La capturadora no responde**: unplug the device's USB cable, wait five seconds and plug it back in; Baird retries
@@ -70,7 +71,7 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
-shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default).
+shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default). The copilot has its own too (`copilot`): whether an assistant may draw over the live picture (the switch is in the Copilot button), the size of the picture it gets when it looks, the minutes after which a session nobody touches ends, and the language Windows reads the screen in.
 
 ## Connection with Faustus and Hoard Hub
 
@@ -85,6 +86,7 @@ The Hub starts and stops the app from its tile and the plugin manifest `faustus-
 | Text | `media_search`, `media_ocr`, `ocr_reindex` |
 | Faustus | `send_to_faustus` |
 | Watch | `watch_list`, `watch_add`, `watch_update`, `watch_remove`, `watch_check`, `watch_events`, `hotkeys_status` |
+| Copilot | `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find`, `copilot_status`, `copilot_stop` |
 | Settings | `settings_get`, `settings_set` |
 
 `snapshot_save` and `screen_look` accept a `region`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
@@ -108,6 +110,10 @@ This app carries procedures from the skill library of the family's workspace for
 | `GET/POST /api/watch`, `PUT/DELETE /api/watch/{id}`, `POST /api/watch/{id}/check`, `GET /api/watch/events` | screen watch rules |
 | `GET /api/hotkeys` | global shortcut helper status |
 | `GET/PUT /api/settings`, `GET /api/devices` | settings (`enhance` is an object; a partial update keeps the other keys) |
+| `GET /copilot` | what an assistant reads to guide the person: where things stand and how to drive the copilot, as plain text |
+| `POST /copilot/show`, `/copilot/wait`, `/copilot/stop` | show steps (or just say something), wait until the person needs the assistant, end the session; `show` and `wait` answer with the events and, when eyes are needed, `look_url` |
+| `GET /copilot/look.jpg`, `GET /copilot/text` | the screen as a small JPEG (`?w=`, `?region=x,y,w,h`); every text on it with its place (`?q=` finds one) |
+| `GET /copilot/state`, `WS /copilot/ws`, `POST /copilot/user` | what the page draws, pushed on every change, and the person's buttons (next, back, help, say, stop) |
 | `WS /api/live` | live fragmented MP4 (`init` JSON, init segment, fragments; `reset` starts a new stream); the enhanced picture while the enhancement is on, `?view=raw` for the original |
 
 An isolated Hub profile starts with an empty media folder under its data directory. Capture and global shortcuts default to off, and background watchers stay off in this profile.
@@ -124,9 +130,9 @@ An isolated Hub profile starts with an empty media folder under its data directo
 
 | Path | Contents |
 |---|---|
-| `baird_hoard/` | Application: capture, live stream, enhancement chain, media library, OCR, watch rules, hotkeys, API |
+| `baird_hoard/` | Application: capture, live stream, enhancement chain, media library, OCR, watch rules, copilot, hotkeys, API |
 | `baird_hoard/static/` | Web interface |
-| `native/` | `bairdcap` helper that reads the device (source and compiled binary) |
+| `native/` | `bairdcap` helper that reads the device (source and compiled binary); `bairdocr.ps1`, the Windows OCR the copilot reads the screen with |
 | `mcp_server.py` | MCP bridge |
 | `docs/DEVICE.md` | How the capture works |
 | `tests/` | Test suite |

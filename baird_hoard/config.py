@@ -24,6 +24,27 @@ def default_media_dir() -> str:
     return str(Path.home() / "Videos" / "Baird")
 
 
+DEFAULT_COPILOT: dict[str, Any] = {
+    "enabled": True,      # off: no assistant can draw over the live picture
+    "look_side": 1024,    # longest side of the picture an assistant gets when it looks (smaller = cheaper for it)
+    "idle_minutes": 15,   # a session nobody touches (no assistant call, no step done) ends by itself after this long
+    "ocr_lang": "",       # language Windows reads the screen in (es-ES, en-US...); empty = the first one of the user profile
+}
+
+
+def normalize_copilot(raw: Any, base: Any = None) -> dict[str, Any]:
+    data = dict(DEFAULT_COPILOT)
+    for source in (base, raw):
+        if isinstance(source, dict):
+            data.update({k: v for k, v in source.items() if k in DEFAULT_COPILOT and v is not None})
+    try:
+        side, idle = int(data["look_side"]), float(data["idle_minutes"])
+    except (TypeError, ValueError):
+        raise ValueError("copilot.look_side and copilot.idle_minutes must be numbers") from None
+    return {"enabled": data["enabled"] is not False, "look_side": int(min(max(side, 480), 2048)),
+            "idle_minutes": round(min(max(idle, 1.0), 240.0), 1), "ocr_lang": str(data.get("ocr_lang") or "").strip()[:20]}
+
+
 DEFAULT_SETTINGS: dict[str, Any] = {
     "device": "C835",            # part of the DirectShow name of the capture device ("AVerMedia C835 Capture")
     "media_dir": "",             # where screenshots, clips and recordings go (default_media_dir())
@@ -40,6 +61,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "hotkey_shot": "ctrl+alt+c",
     "hotkey_clip": "ctrl+alt+x",
     "enhance": DEFAULT_ENHANCE,  # GPU enhancement of the picture: effects, where it applies, which GPU (enhance.py)
+    "copilot": DEFAULT_COPILOT,  # live guidance drawn over the picture by an assistant (copilot.py)
 }
 
 SNAPSHOT_FORMATS = ("png", "jpg")
@@ -141,7 +163,8 @@ class Settings:
                     raise ValueError(f"Unknown setting: {key}")
                 if value is None:
                     continue
-                data[key] = normalize_enhance(value, data[key]) if key == "enhance" else value
+                data[key] = (normalize_enhance(value, data[key]) if key == "enhance" else
+                             normalize_copilot(value, data[key]) if key == "copilot" else value)
             data = normalize(data)
             self._data = data
             write_json_atomic(self.path, data)
@@ -166,6 +189,7 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     data["ocr_auto"] = bool(data["ocr_auto"])
     data["hotkeys_enabled"] = bool(data["hotkeys_enabled"])
     data["enhance"] = normalize_enhance(data.get("enhance"))
+    data["copilot"] = normalize_copilot(data.get("copilot"))
     for key in ("hotkey_shot", "hotkey_clip"):
         try:
             data[key] = normalize_hotkey(data[key])
