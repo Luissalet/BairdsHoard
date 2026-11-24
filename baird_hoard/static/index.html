@@ -50,6 +50,7 @@
           <button class="btn big" id="btn-rec" title="Grabar (R)"><span class="ico rec-ico">●</span> <span id="rec-label">Grabar</span> <kbd>R</kbd></button>
           <span class="rec-timer" id="rec-timer" role="timer" aria-label="Tiempo de grabación" title="Tiempo de grabación" hidden>00:00</span>
         </div>
+        <button class="btn big" id="btn-transcribe" disabled>Transcribir</button>
         <span class="spacer"></span>
         <span class="meta" id="meta"></span>
         <button class="btn icon" id="btn-pip" title="Vista mini siempre encima (P)">⧉</button>
@@ -57,6 +58,7 @@
         <button class="btn icon" id="btn-mute" title="Sonido (M)">🔇</button>
         <button class="btn icon" id="btn-full" title="Pantalla completa (F)">⛶</button>
       </div>
+      <div id="transcript-status" class="meta" role="status" hidden></div>
     </section>
 
     <aside class="side">
@@ -78,6 +80,16 @@
     </aside>
   </main>
 
+  <dialog id="transcript-options" class="dialog">
+    <form method="dialog">
+      <h2>Transcribir documento</h2>
+      <p>Avanza por el documento dejando un poco de texto visible entre vistas. Elige la zona del documento para excluir menús y barras del OCR.</p>
+      <p>Se guardan la grabación completa y un documento con el texto, las fotos y los esquemas.</p>
+      <button class="btn primary" value="full">Toda la pantalla</button>
+      <button class="btn" value="region">Elegir zona</button>
+      <button class="btn ghost" value="cancel">Cancelar</button>
+    </form>
+  </dialog>
   <dialog id="settings" class="dialog">
     <form method="dialog" id="settings-form">
       <h2>Ajustes</h2>

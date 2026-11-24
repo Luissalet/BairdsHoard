@@ -27,7 +27,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from .capture import CaptureEngine
 from .config import Config, Settings
@@ -151,7 +151,7 @@ class Library:
     def describe(self, path: Path) -> dict[str, Any]:
         st = path.stat()
         ext = path.suffix.lower()
-        kind = "image" if ext in IMAGE_EXT else "video" if ext in VIDEO_EXT else "file"
+        kind = "image" if ext in IMAGE_EXT else "video" if ext in VIDEO_EXT else "document" if ext == ".html" else "file"
         with self._lock:
             entry = dict(self._index.get(path.name, {}))
         if kind == "video" and "duration" not in entry and not entry.get("probed"):
@@ -167,7 +167,7 @@ class Library:
 
     def list(self, kind: str = "all", limit: int = 200) -> list[dict[str, Any]]:
         folder = self.folder
-        files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT | VIDEO_EXT]
+        files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT | VIDEO_EXT | {".html"}]
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         out = []
         for p in files:
@@ -526,6 +526,8 @@ class Recorder:
         self.last: Optional[dict[str, Any]] = None
         self.state = "idle"            # idle | recording | finishing
         self.message = ""
+        self._end_of_stream = threading.Event()
+        self._reader: Optional[threading.Thread] = None
         self._enhanced = False         # the file is being written from the enhanced picture
         lib.engine.add_listener(self._on_data)
 
@@ -540,11 +542,11 @@ class Recorder:
                            target=self._target.name if self._target else None)
             return out
 
-    def start(self) -> dict[str, Any]:
+    def start(self, *, read_stream: Optional[Callable[[Path, Path, threading.Event], None]] = None) -> dict[str, Any]:
         with self.lib.engine.request():
             self.lib.engine.wait_for_picture()
             use_enhanced, note = False, ""
-            if self.lib.wants_enhanced():
+            if read_stream is None and self.lib.wants_enhanced():
                 use_enhanced = self.lib.stage.wait_flowing(12.0)
                 if not use_enhanced:
                     note = "La mejora no estaba lista: se graba la señal original."
@@ -561,6 +563,13 @@ class Recorder:
                 self._target = self.lib._new_path("Grabación", ".mp4")
                 self._file = open(self._tmp, "wb")
                 self._file.write(head)
+                self._end_of_stream = threading.Event()
+                self._reader = None
+                if read_stream is not None:
+                    self._file.flush()
+                    self._reader = threading.Thread(target=read_stream, args=(self._tmp, self._target, self._end_of_stream),
+                                                    name="baird-document", daemon=True)
+                    self._reader.start()
                 self._bytes = len(head)
                 self._started = time.time()
                 self.lib.engine.set_demand("recording", True)
@@ -593,8 +602,10 @@ class Recorder:
                 self.message = "The recording stopped because the picture was lost."
                 self._finish_locked()
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, *, target: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
+            if target is not None and (self._target is None or self._target.name != target):
+                raise BairdError("conflict", "This recording already ended.")
             if self.state != "recording":
                 raise BairdError("conflict", "Nothing is being recorded.")
             self._finish_locked()
@@ -605,6 +616,8 @@ class Recorder:
         self._file = None
         if f:
             f.close()
+        self._end_of_stream.set()
+        reader, self._reader = self._reader, None
         self.state = "finishing"
         self.lib.engine.set_demand("recording", False)
         seconds = round(time.time() - self._started, 1)
@@ -612,6 +625,8 @@ class Recorder:
         def work() -> None:
             ff = self.lib.ffmpeg or "ffmpeg"
             result: dict[str, Any]
+            if reader is not None:
+                reader.join()  # The document reader consumes the final bytes before the TS is moved or deleted.
             try:
                 proc = self.lib._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp),
                                       "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(target)],
@@ -635,7 +650,7 @@ class Recorder:
                 self.last = {**result, "seconds": seconds}
                 self.state = "idle"
 
-        threading.Thread(target=work, name="baird-record-finish", daemon=True).start()
+        threading.Thread(target=work, name="baird-record-finish", daemon=reader is None).start()
 
 
 def jpeg_size(data: bytes) -> tuple[int, int]:

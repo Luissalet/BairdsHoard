@@ -11,7 +11,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..agent_tools import TOOLS_BY_NAME
@@ -182,15 +182,20 @@ def record_stop(request: Request):
 @router.get("/api/media")
 def media(request: Request, kind: str = "all", limit: int = 200):
     lib = services(request).library
-    return {"items": lib.list(kind if kind in ("all", "image", "video") else "all", max(1, min(limit, 1000))),
+    return {"items": lib.list(kind if kind in ("all", "image", "video", "document") else "all", max(1, min(limit, 1000))),
             "folder": str(lib.folder)}
 
 
+@router.get("/api/files/{name}")
 @router.get("/media/{name}")
 def media_file(request: Request, name: str, download: bool = False):
     path = services(request).library.path_of(name)
     disposition = "attachment" if download else "inline"
-    return FileResponse(path, headers={"Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(path.name)}",
+    # The shared UI shell injects its launcher and buffers HTML outside /api/. Stream documents unchanged.
+    if path.suffix.lower() == ".html" and request.url.path.startswith("/media/"):
+        return RedirectResponse(f"/api/files/{quote(path.name)}" + ("?download=true" if download else ""))
+    headers = {"Content-Security-Policy": "sandbox allow-downloads; default-src 'none'; img-src data:; style-src 'unsafe-inline'"} if path.suffix.lower() == ".html" else {}
+    return FileResponse(path, headers={**headers, "Content-Disposition": f"{disposition}; filename*=UTF-8''{quote(path.name)}",
                                        "Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"})
 
 

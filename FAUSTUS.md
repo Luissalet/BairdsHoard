@@ -1,6 +1,6 @@
 # Baird's Hoard — what it can and cannot do
 
-App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (38 tools, images as MCP image
+App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (40 tools, images as MCP image
 content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus with *Add* on the discovered app).
 
 ## Can
@@ -10,6 +10,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Screenshot of the current frame (PNG/JPG) — button, key `C`, `snapshot_save`, or `screen_look` (returns the image
   to the assistant; `save=false` leaves no file).
 - Save the last N seconds (default 30, up to the memory window of 10–600 s) as MP4 instantly — `B`, `clip_save`.
+- Transcribe a document as it scrolls with `transcribe_start` (optional `region`) and `transcribe_stop`. Poll `capture_status.transcription` for progress and the final HTML path. The full recording stays in the library. Views are sampled twice per second and changed pictures are kept with local Windows OCR. Select the document area and scroll with overlap for a cleaner transcript.
 - Record picture and sound until stopped — `R`, `record_start` / `record_stop`; a recording stops by itself, keeping
   what was recorded, when the picture is lost. `media_list` shows the MP4 once finalization has saved its recording metadata.
 - Library of screenshots, clips and recordings (`media_list`, newest first, with absolute paths): drag a card out

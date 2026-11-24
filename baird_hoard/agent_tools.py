@@ -53,6 +53,10 @@ class SnapshotArgs(BaseModel):
     region: Optional[RegionArg] = Field(None, description="Save only this rectangle of the screen (a zone capture).")
 
 
+class TranscribeArgs(BaseModel):
+    region: Optional[RegionArg] = None
+
+
 class SearchArgs(BaseModel):
     query: str = Field(..., min_length=1, max_length=200, description="Words to find in the text of the screenshots (all must appear; case and accents ignored).")
     limit: int = Field(30, ge=1, le=200)
@@ -63,7 +67,7 @@ class ClipArgs(BaseModel):
 
 
 class ListArgs(BaseModel):
-    kind: Literal["all", "image", "video"] = "all"
+    kind: Literal["all", "image", "video", "document"] = "all"
     limit: int = Field(50, ge=1, le=500)
 
 
@@ -335,6 +339,10 @@ TOOLS: list[Tool] = [
          Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.start()),
     Tool("record_stop", _d("Stop the recording; the MP4 appears in the library a moment later.", synonyms="parar grabación"),
          Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.stop()),
+    Tool("transcribe_start", _d("Record the screen and transcribe the document locally while it scrolls. Optionally select its region."),
+         TranscribeArgs, ann(draft_safe=True), lambda s, a: s.transcriber.start(_region(a)), timeout_s=30),
+    Tool("transcribe_stop", _d("Finish the document and its recording. Poll capture_status.transcription for the HTML path."),
+         Empty, ann(draft_safe=True), lambda s, a: s.transcriber.stop()),
     Tool("media_list", _d("List screenshots, clips and recordings, newest first, with their paths."),
          ListArgs, ann(read_only=True), lambda s, a: {"items": s.library.list(a.kind, a.limit), "folder": s.settings.media_dir()}),
     Tool("media_look", _d("Look at a saved screenshot, or a frame of a saved video, as an image."),

@@ -244,8 +244,33 @@ async function refreshStatus() {
   trackWatchAndHotkeys(st);
 
   const rec = st.recording || {};
+  const tr = st.transcription || {};
+  const reading = tr.state === 'reading';
+  const pending = ['reading', 'starting', 'finishing'].includes(tr.state);
+  const transcribe = $('btn-transcribe');
+  transcribe.disabled = !!state.transcribeBusy || !tr.state || (reading ? false : pending || !live || rec.state !== 'idle');
+  transcribe.textContent = reading ? 'Terminar transcripción' : tr.state === 'finishing' ? 'Terminando…' : 'Transcribir';
+  const line = $('transcript-status');
+  line.hidden = !tr.state || tr.state === 'idle';
+  if (!line.hidden) {
+    const count = tr.views === 1 ? '1 vista' : String(tr.views || 0) + ' vistas';
+    if (pending) {
+      const action = tr.state === 'finishing' ? 'Terminando' : 'Transcribiendo';
+      line.textContent = action + ' · ' + count + (tr.unread ? ' · ' + tr.unread + ' sin OCR' : '') +
+        (tr.preview ? ' · ' + tr.preview.slice(-100) : '');
+    } else {
+      line.textContent = tr.state === 'failed' ? 'Transcripción interrumpida. ' + tr.error :
+        (tr.state === 'partial' ? 'Transcripción parcial' : 'Transcripción guardada') + ' · ' + count + ' · ';
+      if (tr.name) {
+        const link = document.createElement('a');
+        link.href = '/media/' + encodeURIComponent(tr.name);
+        link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Abrir documento';
+        line.append(link);
+      }
+    }
+  }
   const recording = rec.state === 'recording';
-  $('btn-rec').disabled = !live && !recording || rec.state === 'finishing';
+  $('btn-rec').disabled = pending || !live && !recording || rec.state === 'finishing';
   $('btn-rec').classList.toggle('recording', recording);
   $('rec-label').textContent = recording ? 'Parar' : rec.state === 'finishing' ? 'Guardando…' : 'Grabar';
   $('rec-badge').hidden = !recording;
@@ -328,26 +353,28 @@ function card(item) {
   li.draggable = true;
   li.title = `${item.name}\nArrástrala a un chat o a una carpeta`;
   const isVideo = item.kind === 'video';
+  const isDocument = item.kind === 'document';
   const sub = [fmtTime(item.modified), fmtSize(item.size)];
   if (item.width) sub.push(`${item.width}×${item.height}`);
   li.innerHTML = `
-    <div class="thumb"><img loading="lazy" alt="">${isVideo ? `<span class="dur">${fmtDur(item.duration)}</span>` : ''}</div>
+    <div class="thumb">${isDocument ? '<span aria-hidden="true">OCR</span>' : '<img loading="lazy" alt="">'}${isVideo ? `<span class="dur">${fmtDur(item.duration)}</span>` : ''}</div>
     <div class="info">
       <div class="name"></div>
       <div class="sub"></div>
       <div class="snip" hidden></div>
       <div class="acts">
+        ${isDocument ? '<button class="btn small" data-act="open">Abrir</button>' : ''}
         <button class="btn small" data-act="copy" title="Copiar el archivo (pega con Ctrl+V)">Copiar</button>
         <button class="btn small accent" data-act="faustus" title="Abrir un chat de Faustus con este archivo adjunto">Faustus</button>
-        ${isVideo ? '' : '<button class="btn small" data-act="annotate" title="Dibujar flechas, recuadros y texto en una copia">Anotar</button>'}
-        ${isVideo ? '' : '<button class="btn small" data-act="text" title="Texto que se lee en la captura (OCR)">Texto</button>'}
+        ${item.kind !== 'image' ? '' : '<button class="btn small" data-act="annotate" title="Dibujar flechas, recuadros y texto en una copia">Anotar</button>'}
+        ${item.kind !== 'image' ? '' : '<button class="btn small" data-act="text" title="Texto que se lee en la captura (OCR)">Texto</button>'}
         <button class="btn small" data-act="reveal" title="Mostrar en el Explorador">Explorador</button>
         ${isVideo && item.origin !== 'light' ? '<button class="btn small" data-act="light" title="Copia de 720p para chats con límite de tamaño">Ligera</button>' : ''}
         ${isVideo ? '<button class="btn small" data-act="enhance" title="Copia mejorada con los efectos de «Mejorar»">Mejorar</button>' : ''}
         <button class="btn small danger" data-act="delete" title="Enviar a la papelera">Borrar</button>
       </div>
     </div>`;
-  li.querySelector('img').src = item.thumb;
+  if (!isDocument) li.querySelector('img').src = item.thumb;
   li.querySelector('.name').textContent = item.name;
   li.querySelector('.sub').textContent = sub.join(' · ');
   if (item.snippet) { const sn = li.querySelector('.snip'); sn.hidden = false; sn.textContent = item.snippet; }
@@ -360,7 +387,7 @@ function card(item) {
 
 function mimeOf(item) {
   const ext = item.name.split('.').pop().toLowerCase();
-  return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', mp4: 'video/mp4', mkv: 'video/x-matroska', mov: 'video/quicktime', ts: 'video/mp2t' }[ext] || 'application/octet-stream';
+  return { html: 'text/html', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', mp4: 'video/mp4', mkv: 'video/x-matroska', mov: 'video/quicktime', ts: 'video/mp2t' }[ext] || 'application/octet-stream';
 }
 
 function startDrag(e, item, li) {
@@ -385,7 +412,8 @@ function startDrag(e, item, li) {
 async function act(what, item) {
   const enc = encodeURIComponent(item.name);
   try {
-    if (what === 'copy') {
+    if (what === 'open') { window.open(item.url, '_blank', 'noopener'); }
+    else if (what === 'copy') {
       await api(`/api/media/${enc}/copy`, { method: 'POST' });
       toast('Copiado. Pégalo en el chat con Ctrl+V.', 'ok');
     } else if (what === 'reveal') {
@@ -514,6 +542,27 @@ function toggleFull() {
 $('btn-shot').addEventListener('click', shot);
 $('btn-clip').addEventListener('click', clip);
 $('btn-rec').addEventListener('click', record);
+$('btn-transcribe').addEventListener('click', async () => {
+  if (state.transcribeBusy || $('btn-transcribe').disabled) return;
+  const reading = state.status?.transcription?.state === 'reading';
+  state.transcribeBusy = true;
+  $('btn-transcribe').disabled = true;
+  try {
+    if (reading) await callTool('transcribe_stop');
+    else {
+      const dialog = $('transcript-options');
+      dialog.returnValue = 'cancel';
+      const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once: true}));
+      dialog.showModal();
+      const mode = await choice;
+      if (mode !== 'full' && mode !== 'region') return;
+      const region = mode === 'region' ? await pickRegion('Marca el documento que quieres transcribir · Esc cancela') : null;
+      if (mode === 'region' && !region) return;
+      await callTool('transcribe_start', {region});
+    }
+  } catch (err) { fail(err); }
+  finally { state.transcribeBusy = false; await refreshStatus(); }
+});
 $('btn-mute').addEventListener('click', toggleMute);
 $('vu').addEventListener('click', resumeMeter);
 for (const ev of ['pointerdown', 'keydown']) document.addEventListener(ev, resumeMeter, { passive: true });

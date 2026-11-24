@@ -19,6 +19,7 @@ from .live import LiveRemux
 from .media import Library
 from .ocr import OcrIndex
 from .textmap import TextReader
+from .transcribe import Transcriber
 from .tsbuf import TsBuffer
 from .watch import WatchEngine
 
@@ -44,6 +45,7 @@ class Services:
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
+        self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
         self.library.on_new_image = self.ocr.enqueue
@@ -126,7 +128,7 @@ class Services:
     def status(self) -> dict[str, Any]:
         cap = self.engine.snapshot()
         return {"capture": cap, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
-                "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
+                "transcription": self.transcriber.status(), "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
                 "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"]),
                 "copilot": self.copilot.status()}
