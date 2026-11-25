@@ -101,6 +101,9 @@ def test_numbered_editor_preserves_code_against_separator():
     assert numbered_editor(image)[2] >= 973
     draw.line((810,0,810,459), fill="#dddddd")
     assert numbered_editor(image)[2] < 810
+    draw.rectangle((940,0,979,459), fill="white")
+    draw.rectangle((970,31,974,38), fill="#707070")
+    assert numbered_editor(image)[2] < 810
 
 
 def test_review_reads_one_original_and_prefers_full_text(tmp_path):

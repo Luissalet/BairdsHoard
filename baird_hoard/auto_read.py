@@ -106,8 +106,9 @@ def numbered_editor(image, *, geometry=None):
             right_edge = region[:, start_ui:]
             separator = gray[top:bottom, x0+occupied[margin][-1]+1:x0+start_ui].astype(np.int16)
             panel_edge = (abs(np.diff(separator, axis=1)) > 4).mean(axis=0)
-            if ((panel_edge > .8).any() and
-                    nd.minimum_filter1d(right_edge, size=round(3*gap), axis=0, mode="constant").any()):
+            in_scroll_track = start_ui >= region.shape[1]-gap
+            visible_thumb = nd.minimum_filter1d(right_edge, size=round(3*gap), axis=0, mode="constant").any()
+            if (panel_edge > .8).any() and (in_scroll_track or visible_thumb):
                 last = occupied[margin][-1]
         x1 = min(image.width,x0+int(last)+round(gap))
         if x1-x0>=150:
