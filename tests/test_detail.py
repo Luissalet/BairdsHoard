@@ -95,6 +95,12 @@ def test_numbered_editor_preserves_code_against_separator():
     assert box is not None
     before = image.crop((127,box[1],box[0],box[3])).convert("L")
     assert before.width == 0 or before.getextrema() == (255,255)
+    draw.rectangle((968,60,972,350), fill="#707070")
+    draw.polygon([(943,203),(943,221),(954,215)], outline="black")
+    # Without a panel boundary, the far-right text/ink could still belong to the editor.
+    assert numbered_editor(image)[2] >= 973
+    draw.line((810,0,810,459), fill="#dddddd")
+    assert numbered_editor(image)[2] < 810
 
 
 def test_review_reads_one_original_and_prefers_full_text(tmp_path):

@@ -12,6 +12,7 @@ def test_require_file_evidence_in_breadcrumb_or_selected_url():
     assert source_label(["src > app > thing.py"]) == ("src/app/thing.py", "")
     assert source_label(["search foo.py and bar.py", "side.py", "other.py"]) == ("", "")
     assert source_label(["https://example.invalid/?selected=one%3Asrc%2Fapp%2Fthi..."]) == ("", "src/app/thi")
+    assert source_label(["https://example.invalid/?selected=one%3Asrc%2Fapp%2..."]) == ("", "src/app")
 
 
 def test_gutter_tolerates_one_bad_digit_and_leaves_fold_boundary_unresolved():

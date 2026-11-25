@@ -27,7 +27,10 @@ def source_label(lines):
                 if PATH.fullmatch(tail):
                     paths.add(tail)
                 elif tail.endswith(("...", "…")):
-                    hints.add(tail.rstrip(".…"))
+                    # A clipped URL can stop halfway through a percent-encoded slash.
+                    prefix = re.sub(r"%[\da-fA-F]?$", "", tail.rstrip(".…"))
+                    if prefix:
+                        hints.add(prefix)
             continue
         parts = re.split(r"\s*[>›»]\s*", line)
         if len(parts) >= 3:
@@ -180,7 +183,7 @@ class Reconstruction:
                 previous = None
                 continue
             if not name and previous:
-                prev_name, prev_rows = previous
+                prev_name, prev_rows, prev_hint = previous
                 overlap = rows.keys() & prev_rows.keys()
                 compared = [n for n in overlap if rows[n][0].strip() or prev_rows[n][0].strip()]
                 matches = [rows[n][0].strip() for n in compared if rows[n][0] == prev_rows[n][0]]
@@ -189,14 +192,15 @@ class Reconstruction:
                                   for text in distinct)
                 # Shared imports and braces occur at the same positions in unrelated files.
                 # A truncated breadcrumb can veto attribution, never establish it alone.
-                if (len(distinct) >= 2 and substantive and len(matches) >= .8*len(compared) and
-                        (not hint or prev_name.startswith(hint))):
+                compatible = not hint or prev_name.startswith(hint) or (
+                    prev_name.startswith("Fragmento sin ruta ") and hint == prev_hint)
+                if len(distinct) >= 2 and substantive and len(matches) >= .8*len(compared) and compatible:
                     name = prev_name
             if not name:
                 name = f"Fragmento sin ruta {stamp.replace(':','-')}"
             for n, (text, sure) in rows.items():
                 files[name][n].append((text, sure, stamp, seconds))
-            previous = name, rows
+            previous = name, rows, hint
         return files
 
     def export(self, out, video):

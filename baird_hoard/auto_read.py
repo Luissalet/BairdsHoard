@@ -98,9 +98,17 @@ def numbered_editor(image, *, geometry=None):
         if not len(occupied):
             continue
         last = occupied[-1]
-        margin = occupied < region.shape[1]-gap
+        margin = occupied < region.shape[1] - round(2.5*gap)
         if margin.any() and (~margin).any() and occupied[~margin][0]-occupied[margin][-1] > 5*gap:
-            last = occupied[margin][-1]
+            # A pointer beside the scrollbar can span more than one text row's width.
+            # Require an actual continuous vertical stroke before excluding the margin.
+            start_ui = occupied[~margin][0]
+            right_edge = region[:, start_ui:]
+            separator = gray[top:bottom, x0+occupied[margin][-1]+1:x0+start_ui].astype(np.int16)
+            panel_edge = (abs(np.diff(separator, axis=1)) > 4).mean(axis=0)
+            if ((panel_edge > .8).any() and
+                    nd.minimum_filter1d(right_edge, size=round(3*gap), axis=0, mode="constant").any()):
+                last = occupied[margin][-1]
         x1 = min(image.width,x0+int(last)+round(gap))
         if x1-x0>=150:
             if geometry is not None:
