@@ -280,6 +280,11 @@ class RecordingSearch:
                                 return
                         except Exception:
                             db.rollback()
+                            if self.stop_event.is_set():
+                                with db:
+                                    db.execute("UPDATE assets SET state='pending',retry=0 WHERE path=? AND signature=?",
+                                               (str(path),sig))
+                                return
                             with db:
                                 db.execute("UPDATE assets SET state='error',retry=? WHERE path=? AND signature=?",
                                            (time.time()+120,str(path),sig))
@@ -343,6 +348,8 @@ class RecordingSearch:
                     if n%4 == 0:
                         self.save(db,path,sig,rows,start+n)
                         rows.clear()
+                if self.stop_event.is_set():
+                    raise InterruptedError()
                 if not n:
                     raise ValueError("La grabación no contiene fotogramas.")
                 self.save(db,path,sig,rows,start+min(n,count),done=n<=count)

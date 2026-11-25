@@ -128,7 +128,10 @@ class CaptureFeedback:
             self.hint = hint
         if identity:
             self.identity = identity
-        key = self.identity or self.hint or str(self.segment)
+        # A fuzzy header fingerprint can detect a transition, but distinct confirmed paths
+        # (including punctuation and case) must never share captured or missing lines.
+        key = ("path:" + self.file if self.file else "header:" + self.identity if self.identity
+               else "hint:" + self.hint if self.hint else "segment:" + str(self.segment))
         tokens = {word.casefold() for text in texts for word in re.findall(r"[\w.]{3,}", text)}
         density = sum(len(t.split()) for t in texts)
         sharp, texture = edge_profile(gray)

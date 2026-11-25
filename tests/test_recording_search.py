@@ -34,6 +34,25 @@ def test_partial_occlusion_with_gutter_still_visible():
     assert feedback.observe(good,2) is None
 
 
+def test_confirmed_paths_with_similar_ocr_shapes_keep_their_own_gaps():
+    feedback = CaptureFeedback()
+    feedback.observe(page("src/a-b.py",1),0)
+    assert feedback.observe(page("src/a-b.py",20),1)["kind"] == "gap"
+    assert feedback.observe(page("src/a_b.py",150),2) is None
+    assert feedback.observe(page("src/A-B.py",40),3) is None
+
+
+def test_fast_unrelated_text_is_different_from_pausing_on_each_page():
+    def document(prefix):
+        return [[10,i*18,240,15,f"{prefix}_{i} section {prefix}",[]] for i in range(12)]
+    for spacing, expected in ((.5, "speed"),(5,None)):
+        feedback = CaptureFeedback()
+        feedback.observe(document("first"),0)
+        feedback.observe(document("next"),spacing)
+        alert = feedback.observe(document("last"),2*spacing)
+        assert (alert and alert["kind"]) == expected
+
+
 def test_index_existing_reports_links_video_and_handles_rename_and_pagination(tmp_path):
     library = SimpleNamespace(config=SimpleNamespace(data_dir=tmp_path),
         folder=tmp_path,recorder=SimpleNamespace(is_writing=lambda p:False),
