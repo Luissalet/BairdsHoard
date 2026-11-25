@@ -11,6 +11,7 @@ import zipfile
 EXT = r"(?:py|js|jsx|ts|tsx|java|go|rs|c|cc|cpp|h|hpp|cs|kt|rb|php|sh|ps1|sql|yml|yaml|json|xml|html|css|toml|ini|md|mmd|txt)"
 PART = r"[\w@+.-]+"
 PATH = re.compile(rf"(?:{PART}/)*{PART}\.{EXT}$", re.I)
+DEVICE = re.compile(r"(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)", re.I)
 
 
 def source_label(lines):
@@ -83,7 +84,9 @@ def numbered_slots(words, layout, scale, origin):
             # Interior holes need consistent neighbors. One or two missing edge digits are
             # recoverable where several adjacent numbers agree on the origin.
             bracketed = any(j <= i for j, _ in near) and any(j >= i for j, _ in near)
-            if (bracketed or (len(near) >= 2 and i in (0, 1, slots-2, slots-1))) and i+offset > 0:
+            extrapolate = (len(near) >= 2 and i in (0, 1, slots-2, slots-1) and
+                           not votes.get(i, set()) - {offset})
+            if (bracketed or extrapolate) and i+offset > 0:
                 numbers[i] = i+offset
     return numbers
 
@@ -171,21 +174,23 @@ class Reconstruction:
 
     def collect(self):
         files = defaultdict(lambda: defaultdict(list))
-        names = {name for _, _, name, _, _ in self.views if name}
         previous = None
         for stamp, seconds, name, hint, rows in self.views:
             if not rows:
                 previous = None
                 continue
-            if not name and hint:
-                candidates = [n for n in names if n.startswith(hint)]
-                if len(candidates) == 1:
-                    name = candidates[0]
             if not name and previous:
                 prev_name, prev_rows = previous
-                matches = {value[0] for n,value in rows.items() if n in prev_rows and
-                           len(value[0].strip()) >= 8 and prev_rows[n][0] == value[0]}
-                if len(matches) >= 2 and (not hint or prev_name.startswith(hint)):
+                overlap = rows.keys() & prev_rows.keys()
+                compared = [n for n in overlap if rows[n][0].strip() or prev_rows[n][0].strip()]
+                matches = [rows[n][0].strip() for n in compared if rows[n][0] == prev_rows[n][0]]
+                distinct = {text for text in matches if len(text) >= 8}
+                substantive = any(not re.match(r"(?:from|import|using|package|include)\b", text)
+                                  for text in distinct)
+                # Shared imports and braces occur at the same positions in unrelated files.
+                # A truncated breadcrumb can veto attribution, never establish it alone.
+                if (len(distinct) >= 2 and substantive and len(matches) >= .8*len(compared) and
+                        (not hint or prev_name.startswith(hint))):
                     name = prev_name
             if not name:
                 name = f"Fragmento sin ruta {stamp.replace(':','-')}"
@@ -209,6 +214,7 @@ class Reconstruction:
                 # OCR names are display data. Never write them as filesystem paths.
                 parts = [re.sub(r"[^\w .@+-]", "_", p).strip(" .")[:100] or "_"
                          for p in PurePosixPath(path).parts if p not in ("/", ".", "..")]
+                parts = ["_" + p if DEVICE.match(p) else p for p in parts]
                 base = "/".join(parts) or "fragmento"
                 member = base + ".txt"
                 suffix = 1
