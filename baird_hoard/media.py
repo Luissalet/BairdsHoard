@@ -27,6 +27,7 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 from typing import Any, Callable, Optional
 
 from .capture import CaptureEngine
@@ -163,7 +164,7 @@ class Library:
                 "modified": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
                 "width": entry.get("width"), "height": entry.get("height"), "duration": entry.get("duration"),
                 "origin": entry.get("origin", "file"), "audio": entry.get("audio"), "enhanced": bool(entry.get("enhanced")),
-                "url": f"/media/{path.name}", "thumb": f"/api/thumb/{path.name}?v={int(st.st_mtime)}"}
+                "url": f"/media/{quote(path.name, safe='')}", "thumb": f"/api/thumb/{quote(path.name, safe='')}?v={int(st.st_mtime)}"}
 
     def list(self, kind: str = "all", limit: int = 200) -> list[dict[str, Any]]:
         folder = self.folder
@@ -171,6 +172,10 @@ class Library:
         files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
         out = []
         for p in files:
+            if ((kind == "image" and p.suffix.lower() not in IMAGE_EXT) or
+                    (kind == "video" and p.suffix.lower() not in VIDEO_EXT) or
+                    (kind == "document" and p.suffix.lower() != ".html")):
+                continue
             if self.recorder.is_writing(p):
                 continue
             d = self.describe(p)

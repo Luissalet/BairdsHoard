@@ -397,7 +397,9 @@ def main(model_dir, gpu, source, mode, output, ffmpeg=None):
             reconstruction = Reconstruction()
         source_frames = video_frames(Path(source), ffmpeg) if video else document_frames(Path(source))
         frames = stack.enter_context(closing(source_frames))
-        out.write(HEADER + "<p>Segunda lectura local con UnlimitedOCR · " + html.escape(Path(source).name) +
+        video_name = linked_video(Path(source))
+        attribution = f' data-baird-video="{html.escape(video_name, quote=True)}"' if video_name else ""
+        out.write(HEADER + f"<p{attribution}>Segunda lectura local con UnlimitedOCR · " + html.escape(Path(source).name) +
                   '</p><p><a href="#texto-automatico">Ir al TXT automático</a></p>\n')
         if rebuild:
             out.write('<p><a href="#archivos">Ver archivos reconstruidos</a></p>\n')
@@ -434,7 +436,7 @@ def main(model_dir, gpu, source, mode, output, ffmpeg=None):
         if not count:
             raise ValueError("El archivo no contiene vistas que se puedan transcribir.")
         if rebuild:
-            reconstruction.export(out, linked_video(Path(source)))
+            reconstruction.export(out, video_name)
         plain = base64.b64encode("\n".join(transcript).encode("utf-8")).decode("ascii")
         checked = base64.b64encode("\n".join(review).encode("utf-8")).decode("ascii")
         out.write(f'<p><a download="lectura-por-tiempo.txt" href="data:text/plain;charset=utf-8;base64,{checked}">Descargar vistas con avisos</a></p>')

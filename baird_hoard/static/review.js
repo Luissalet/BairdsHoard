@@ -4,10 +4,10 @@ const reviewEl = name => document.getElementById('review-' + name);
 let reviewDoc = null;
 let reviewRequest = 0;
 
-async function openDocumentReview(item) {
+async function openDocumentReview(item, index = 0) {
   reviewDoc = {name: item.name, stamps: [], entries: {}, key: '', index: 0, saved: true};
   reviewDialog.showModal();
-  await loadReviewView(0);
+  await loadReviewView(index);
 }
 
 async function loadReviewView(index) {

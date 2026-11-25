@@ -103,9 +103,9 @@ def media_annotate(request: Request, name: str, body: AnnotateBody):
 
 
 @router.get("/api/search")
-def search(request: Request, q: str = "", limit: int = 50):
-    """Screenshots by the text they show (OCR) or their name."""
-    return tool(request, "media_search", {"query": q, "limit": max(1, min(limit, 200))})
+def search(request: Request, q: str = "", limit: int = 50, recording: str | None = None, after: float | None = None):
+    """Search the current library for visible text and timestamped excerpts."""
+    return tool(request, "media_search", {"query": q, "limit": max(1, min(limit, 200)), "recording": recording, "after": after})
 
 
 @router.get("/api/ocr/status")

@@ -265,6 +265,10 @@ async function refreshStatus() {
   transcribe.disabled = !!state.transcribeBusy || !tr.state || (reading ? false : pending || !live || rec.state !== 'idle');
   transcribe.textContent = reading ? 'Terminar transcripción' : tr.state === 'finishing' ? 'Terminando…' : 'Transcribir';
   const line = $('transcript-status');
+  const feedback = $('capture-feedback');
+  const notice = reading ? tr.feedback : null;
+  feedback.hidden = !notice;
+  if (notice && feedback.textContent !== notice.text) feedback.textContent = notice.text;
   line.hidden = !tr.state || tr.state === 'idle';
   if (!line.hidden) {
     const count = tr.views === 1 ? '1 vista' : String(tr.views || 0) + ' vistas';
@@ -334,20 +338,30 @@ function markFresh(name) {
   setTimeout(() => { state.fresh.delete(name); renderList(); }, 15000);
 }
 
+let listRequest = 0;
 async function refreshList(force) {
+  const request = ++listRequest;
   let data;
   const q = state.search.trim();
   try {
     data = q ? await api(`/api/search?q=${encodeURIComponent(q)}&limit=120`) : await api(`/api/media?kind=${state.kind}&limit=120`);
   } catch (err) {
+    if (request !== listRequest || q !== state.search.trim()) return;
     if (q) { $('search-note').hidden = false; $('search-note').textContent = err.message; }
     return;
   }
+  if (request !== listRequest || q !== state.search.trim()) return;
   const note = $('search-note');
   note.hidden = !q;
-  if (q) note.textContent = `${data.items.length} captura(s) con «${q}»` + (data.unread ? ` · ${data.unread} sin leer todavía` : '');
+  if (q) {
+    const status = data.recordings || {};
+    note.textContent = [`${data.items.length} resultados para «${q}»`,
+      data.unread && `${data.unread} capturas pendientes`,
+      status.pending && `Indexando grabaciones e informes · ${status.pending} pendientes`,
+      status.failed && `${status.failed} archivos con error de lectura`].filter(Boolean).join(' · ');
+  }
   $('side-tip').hidden = !!q;
-  const key = (q ? `q:${q}|` : '') + data.items.map((i) => `${i.name}|${i.size}|${i.modified}`).join(',');
+  const key = (q ? `q:${q}|` : '') + data.items.map((i) => `${i.name}|${i.size}|${i.modified}|${JSON.stringify(i.moments || [])}`).join(',');
   if (!force && key === state.lastListKey) return;
   state.lastListKey = key;
   state.items = data.items;
@@ -395,6 +409,51 @@ function card(item) {
   li.querySelector('.name').textContent = item.name;
   li.querySelector('.sub').textContent = sub.join(' · ');
   if (item.snippet) { const sn = li.querySelector('.snip'); sn.hidden = false; sn.textContent = item.snippet; }
+  if (item.moments?.length) {
+    const list = document.createElement('div');
+    list.className = 'search-moments';
+    const rest = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = 'Más instantes';
+    rest.append(summary);
+    const appendMoment = (hit, container) => {
+      const stamp = `${Math.floor(hit.seconds / 60)}:${(hit.seconds % 60).toFixed(1).padStart(4, '0')}`;
+      const row = document.createElement('div');
+      const link = document.createElement(isVideo ? 'a' : 'button');
+      link.textContent = stamp;
+      if (isVideo) {
+        link.href = '/media/' + encodeURIComponent(item.name) + '#t=' + hit.seconds;
+        link.target = '_blank'; link.rel = 'noopener';
+      } else {
+        link.type = 'button';
+        link.addEventListener('click', () => openDocumentReview(item, hit.view));
+      }
+      row.append(link, document.createTextNode(' ' + [hit.context,hit.snippet].filter(Boolean).join(' · ')));
+      container.append(row);
+    };
+    item.moments.forEach((hit, index) => appendMoment(hit, index < 2 ? list : rest));
+    if (item.next_after != null) {
+      const more = document.createElement('button');
+      more.type = 'button'; more.className = 'btn small'; more.textContent = 'Cargar más instantes';
+      let after = item.next_after;
+      const q = state.search;
+      more.addEventListener('click', async () => {
+        more.disabled = true;
+        try {
+          const params = new URLSearchParams({q, recording:item.name, after:String(after)});
+          const next = (await api('/api/search?' + params)).items[0];
+          (next?.moments || []).forEach(hit => appendMoment(hit, rest));
+          after = next?.next_after;
+          if (after == null) more.remove(); else rest.append(more);
+        } catch (err) { fail(err); }
+        finally { more.disabled = false; }
+      });
+      rest.append(more);
+    }
+    if (item.moments.length > 2) list.append(rest);
+    li.querySelector('.snip').hidden = true;
+    li.querySelector('.acts').before(list);
+  }
   li.querySelector('.thumb').addEventListener('dblclick', () => window.open(item.url, '_blank'));
   li.addEventListener('dragstart', (e) => startDrag(e, item, li));
   li.addEventListener('dragend', () => li.classList.remove('dragging'));

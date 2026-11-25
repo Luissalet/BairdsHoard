@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .detail_job import DetailJob
+from .capture_feedback import CaptureFeedback
 from .errors import BairdError
 from .media import Library, jpeg_size
 from .native import NO_WINDOW
@@ -159,6 +160,7 @@ class Transcriber:
             self._finished = finished
             self._report.update(state="reading", video=video.name)
         reader = TextReader()
+        feedback = CaptureFeedback()
         views = unread = 0
         error = ""
         path = video.with_name(video.stem.replace("Grabación", "Transcripción", 1) + ".html")
@@ -181,22 +183,41 @@ class Transcriber:
                         elapsed = int(frame.stem) / FPS
                         warning = ""
                         original = frame.read_bytes()
+                        gray = b""
+                        mapped = []
+                        enlarged = Path(tmp) / (frame.stem + "-ocr.png")
                         try:
                             ocr_input = frame
                             longest = max(jpeg_size(original))
+                            cmd = [self.library.ffmpeg, "-loglevel", "error", "-y", "-i", str(frame)]
                             if 0 < longest <= 2000:
-                                # The local reader handles small UI fonts better at double scale.
-                                enlarged = Path(tmp) / "ocr.png"
-                                resized = self.library._run([self.library.ffmpeg, "-loglevel", "error", "-y", "-i", str(frame),
-                                                             "-vf", "scale=iw*2:ih*2:flags=lanczos", str(enlarged)])
-                                if resized.returncode == 0:
+                                cmd += ["-map", "0:v", "-vf", "scale=iw*2:ih*2:flags=lanczos", "-threads", "1", str(enlarged)]
+                            resized = self.library._run(cmd + ["-map", "0:v", "-vf", "scale=320:180", "-pix_fmt", "gray",
+                                                               "-threads", "1", "-f", "rawvideo", "pipe:1"])
+                            if resized.returncode == 0:
+                                gray = resized.stdout
+                                if enlarged.is_file():
                                     ocr_input = enlarged
-                            lines = [line[4] for line in reader.read(ocr_input, lang)["lines"]]
+                            mapped = reader.read(ocr_input, lang)["lines"]
+                            lines = [line[4] for line in mapped]
                         except BairdError as exc:
                             unread += 1
                             warning = "OCR no disponible para esta vista."
                             error = str(exc)
                             lines = []
+                        finally:
+                            try:
+                                enlarged.unlink(missing_ok=True)
+                            except PermissionError:
+                                pass
+                        alert = feedback.observe(mapped, elapsed, gray, failed=bool(warning))
+                        if not finished.is_set():
+                            newest = max((int(p.stem) for p in Path(tmp).glob("*.jpg") if p.stem.isdecimal()),
+                                         default=int(frame.stem))
+                            delay = (newest-int(frame.stem))/FPS
+                            if delay >= 4:
+                                alert = {"kind":"lag", "seconds":elapsed,
+                                         "text":f"El OCR lleva {int(delay)} s de retraso. Pausa para que alcance la vista actual."}
                         added = new_lines(previous, lines)
                         previous = lines
                         transcript.extend(added)
@@ -212,9 +233,10 @@ class Transcriber:
                         views += 1
                         with self._lock:
                             self._report.update(views=views, preview="\n".join(added)[-250:] or self._report.get("preview", ""),
-                                                unread=unread)
+                                                unread=unread, feedback=alert)
                 finally:
                     frames.close()
+                    reader.stop()
                     plain = base64.b64encode("\n".join(transcript).encode("utf-8")).decode("ascii")
                     out.write(f'<p id="texto"><a download="transcripcion.txt" href="data:text/plain;charset=utf-8;base64,{plain}">'
                               'Descargar solo el texto (.txt)</a></p></html>')

@@ -17,7 +17,8 @@ from .hoard_link.tokens import read_or_create_token
 from .hotkeys import HotkeyHelper
 from .live import LiveRemux
 from .media import Library
-from .ocr import OcrIndex
+from .ocr import OcrIndex, fold
+from .recording_search import RecordingSearch
 from .textmap import TextReader
 from .transcribe import Transcriber
 from .tsbuf import TsBuffer
@@ -48,9 +49,10 @@ class Services:
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
+        self.recordings = RecordingSearch(self.library)
         self.library.on_new_image = self.ocr.enqueue
-        self.library.on_rename = self.ocr.renamed
-        self.library.on_delete = self.ocr.deleted
+        self.library.on_rename = self._renamed
+        self.library.on_delete = self._deleted
         self.watch = WatchEngine(config.data_dir / "watch.json", self.library, self.engine, config.work_dir,
                                  ocr_fn=lambda path: self.ocr.ocr_fn(path), notify_fn=self._notify, emit_fn=family.emit,
                                  on_demand=lambda active: self.engine.set_demand("watch", active))
@@ -63,10 +65,12 @@ class Services:
         if self.config.background:
             self.engine.settings_changed()
             self.ocr.start()
+            self.recordings.resume()
             self.watch.start()
             self._start_hotkeys()
 
     def stop(self) -> None:
+        self.recordings.stop()
         self.transcriber.detail.cancel(closing=True)
         self.copilot.close()
         if self.library.recorder.state == "recording":
@@ -81,6 +85,21 @@ class Services:
         self.stage.stop()
         self.live_enhanced.stop()
         self.engine.stop()
+
+    def _renamed(self, old, new):
+        self.ocr.renamed(old, new)
+        self.recordings.renamed(old, new)
+
+    def _deleted(self, name):
+        self.ocr.deleted(name)
+        self.recordings.deleted(name)
+
+    def search(self, query, limit, recording=None, after=None):
+        result = self.ocr.search(query, limit)
+        clips, progress = self.recordings.search(fold(query).split(), limit, recording=recording, after=after)
+        result["items"] = clips if recording or after is not None else (clips + result["items"])[:limit]
+        result["recordings"] = progress
+        return result
 
     def _start_hotkeys(self) -> None:
         s = self.settings

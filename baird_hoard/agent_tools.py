@@ -18,7 +18,7 @@ from .services import Services
 AGENT_INSTRUCTIONS = """Baird's Hoard shows what another computer puts on the HDMI capture device plugged into this PC (an AVerMedia Live Gamer Portable Lite) and keeps the last minutes in memory.
 screen_look returns the current picture of the other computer as an image (and saves it as a screenshot); use it to see what the user is looking at on that device. capture_status says whether there is a picture (state running), the input resolution and how many seconds are kept; state stuck means the device stopped responding and the user has to unplug and replug its USB cable (say so).
 clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_stop record until stopped. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
-snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds screenshots by the text they show (read in the background with the family's OCR: Kafka's Hoard); media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
+snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds visible text in screenshots, recordings and saved reports and returns timestamped excerpts; media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
 enhance_set turns the GPU enhancement on and chooses the effects (denoise, upscale, sharpen, interpolate, hdr): the live view, clips and recordings then use the enhanced picture (screen_look and screenshots stay the original). enhance_status shows what it does now and what each effect costs per frame; enhance_benchmark measures that cost on a sample; media_enhance writes an enhanced copy of a saved video.
 Copilot mode guides the person live on that screen: copilot_show draws steps over the live picture (a red dot where to click, boxes, arrows, the text to type, the keys to press) with one short instruction each as a subtitle under it, and Baird moves from step to step by itself by watching the screen, so send the whole plan in one call and let it wait (wait_s); it answers when the plan is done or the person needs you, with the picture. Its message is you talking to the person in the conversation beside the picture, where they can write back (event say). Point at things by the text they show ("click": "Guardar") whenever they have one: no look needed and it follows scrolling. copilot_look is the cheap way to see the screen while guiding (nothing is saved), copilot_find says where a text is, copilot_wait waits for the person, copilot_stop ends the session. You cannot click or type on the other computer: the person does it.
@@ -59,8 +59,10 @@ class TranscribeArgs(BaseModel):
 
 
 class SearchArgs(BaseModel):
-    query: str = Field(..., min_length=1, max_length=200, description="Words to find in the text of the screenshots (all must appear; case and accents ignored).")
+    query: str = Field(..., min_length=1, max_length=200, description="Words to find in screenshots, saved reports and the visible text of recordings. All must appear, ignoring case and accents.")
     limit: int = Field(30, ge=1, le=200)
+    recording: Optional[str] = Field(None, max_length=255, description="Limit timestamp results to this library item.")
+    after: Optional[float] = Field(None, ge=0, allow_inf_nan=False, description="Return moments after this playback second.")
 
 
 class ClipArgs(BaseModel):
@@ -366,11 +368,11 @@ TOOLS: list[Tool] = [
          RevealArgs, ann(idempotent=True), lambda s, a: s.library.reveal(a.name)),
     Tool("media_rename", _d("Rename a file of the library."), RenameArgs, ann(), lambda s, a: s.library.rename(a.name, a.new_name)),
     Tool("media_delete", _d("Send a file of the library to the Recycle Bin (confirm=true)."), DeleteArgs, ann(destructive=True), _delete),
-    Tool("media_search", _d("Find screenshots by the text they show (OCR) or by their name.",
+    Tool("media_search", _d("Find visible text in screenshots, recordings and saved transcripts, or search by name. Video moments include seconds and snippets.",
                             "Every word must appear; case and accents are ignored. Returns the files with a snippet of the matching text; "
                             "`unread` counts screenshots whose text is not read yet (media_ocr / ocr_reindex).",
                             "buscar capturas, buscar por texto, qué captura tenía"),
-         SearchArgs, ann(read_only=True), lambda s, a: s.ocr.search(a.query, a.limit), timeout_s=30),
+         SearchArgs, ann(read_only=True), lambda s, a: s.search(a.query, a.limit, a.recording, a.after), timeout_s=30),
     Tool("media_ocr", _d("Read the text of one saved screenshot now (Kafka's OCR) and return it.", synonyms="leer texto, OCR"),
          NameArg, ann(idempotent=True), lambda s, a: s.ocr.read_now(a.name), timeout_s=150),
     Tool("ocr_reindex", _d("Queue every screenshot whose text is missing or out of date for the background OCR; returns the counts."),
