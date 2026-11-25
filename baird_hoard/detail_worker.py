@@ -106,7 +106,80 @@ def document(model, image, blocks):
     return lines, warnings
 
 
-def code(model, image, blocks):
+def estimate_pitch(energy, frequencies, widths):
+    """Use several independently located OCR lines to disambiguate harmonics of the character grid."""
+    import numpy as np
+    power = np.square(energy).mean(axis=0)
+    pitches = 1 / frequencies
+    fallback = float(pitches[power.argmax()])
+    if len(widths) < 3:
+        return fallback, False
+    median = float(np.median(widths))
+    supporters = [v for v in widths if abs(v - median) <= median * .07]
+    if len(supporters) < max(3, len(widths) * .65):
+        return fallback, False
+    region = np.flatnonzero(abs(pitches - median) <= median * .06)
+    if not len(region):
+        return fallback, False
+    return float(pitches[region[power[region].argmax()]]), True
+
+
+def conflict_area(chosen, other, pitch, anchored, left, right, top, bottom, row, indent):
+    """Localize the first divergence. After an insertion, the remaining columns may no longer align."""
+    start = end = -1
+    x, last = left, right
+    if anchored and chosen and other and chosen != other:
+        prefix = 0
+        while prefix < min(len(chosen), len(other)) and chosen[prefix] == other[prefix]:
+            prefix += 1
+        suffix = 0
+        while suffix < min(len(chosen), len(other)) - prefix and chosen[-1-suffix] == other[-1-suffix]:
+            suffix += 1
+        # A large or poorly anchored disagreement is more useful as a whole line.
+        length = max(len(chosen), len(other)) - suffix - prefix
+        if length <= 12 and abs(len(chosen) - (right-left)/pitch) <= 2:
+            start = indent + prefix
+            end = indent + len(chosen) - suffix
+            x = min(right-1, max(left, round(start*pitch)))
+            last = min(right, max(x+1, round((start+max(1,length))*pitch)))
+    return [row, start, end, x, top, last-x, bottom-top]
+
+
+def repeated_delimiters(ink, readings, blocks, size, pitch, step):
+    """Recover isolated brackets from matching pixels at another position on the same code grid."""
+    import numpy as np
+    if not step:
+        return {}
+    w, h = size
+    brackets = set("()[]{}")
+    boxes = [(text, (x+r)*w/2000, (y+b)*h/2000) for _, (x,y,r,b), text in blocks
+             if text in brackets and 0 < (r-x)*w/1000 < 2.5*pitch]
+    small = []
+    for i, (a,b,left,right,detail,context,complete) in enumerate(readings):
+        if right-left > pitch*1.25 or b-a < 5:
+            continue
+        patch = ink[a:b, left:right]
+        patch = patch / max(float(np.linalg.norm(patch)), 1)
+        center = (a+b)/2
+        labels = {ch for ch, x, y in boxes if left-pitch/2 <= x <= right+pitch/2 and a <= y <= b}
+        if complete and detail == context and detail in brackets:
+            labels.add(detail)
+        small.append((i, center, patch, labels))
+    recovered = {}
+    for i, y, patch, own in small:
+        seen = set()
+        for j, other_y, other, labels in small:
+            if i == j or not labels or patch.shape != other.shape:
+                continue
+            delta = (other_y-y)/step
+            if abs(delta-round(delta))*step <= 1.5 and np.sum(patch*other) >= .985:
+                seen.update(labels)
+        if len(seen) == 1 and (not own or own == seen):
+            recovered[i] = next(iter(seen))
+    return recovered
+
+
+def code(model, image, blocks, *, areas=None):
     import numpy as np
     from scipy import ndimage as nd
     from PIL import ImageFilter
@@ -121,17 +194,16 @@ def code(model, image, blocks):
     freq = np.fft.rfftfreq(16384)
     select = (freq >= 1/22) & (freq <= 1/5.5)
     energy = [abs(np.fft.rfft(ink[a:b].sum(axis=0), 16384)[select]) / max(1, ink[a:b].sum()) for a,b in bands]
-    pitch = 1/freq[select][np.square(energy).mean(axis=0).argmax()]
+
     by_y = []
     for _, (_,y,_,b), text in blocks:
         parts = text.splitlines()
         for n, part in enumerate(parts):
             center = (y+(n+0.5)*(b-y)/len(parts))*image.height/1000
             by_y.append((center, part.strip()))
-    lines, warnings = [], []
-    gaps = np.diff([(a+b)/2 for a,b in bands])
-    step = np.median(gaps[gaps <= np.median(gaps)]) if len(gaps) else 0
-    for i, (a,b) in enumerate(bands):
+    readings = []
+    widths = []
+    for a,b in bands:
         xs = np.flatnonzero((ink[a:b] > 35).any(axis=0))
         if not len(xs):
             continue
@@ -141,15 +213,35 @@ def code(model, image, blocks):
         center = (a+b)/2
         near = min(by_y, key=lambda pair:abs(pair[0]-center), default=(float("inf"), ""))
         context = near[1] if abs(near[0]-center) < max(4,(b-a)*.75) else ""
-        indent = int(left/pitch)
+        if complete and len(detail) >= 10 and detail == context:
+            widths.append((right-left)/len(detail))
+        readings.append((a,b,left,right,detail,context,complete))
+    pitch, anchored = estimate_pitch(energy, freq[select], widths)
+    lines, warnings = [], []
+    centers = [(a+b)/2 for a,b,*_ in readings]
+    gaps = np.diff(centers)
+    step = np.median(gaps[gaps <= np.median(gaps)]) if len(gaps) else 0
+    repeated = repeated_delimiters(ink, readings, blocks, image.size, pitch, step) if anchored else {}
+    for i, (a,b,left,right,detail,context,complete) in enumerate(readings):
+        # Glyphs on a subpixel cell boundary can begin one raster pixel before it.
+        indent = int((left + min(1.0, pitch * .12))/pitch)
         # Compare with the physical character cells; a model may invent a plausible, longer identifier.
         width = max(1,round((right-indent*pitch)/pitch))
         candidates = [s for s in (detail, context) if s]
         text = min(candidates, key=lambda s:abs(len(s)-width), default="")
+        recovered = i in repeated and len(text) != 1
+        if recovered:
+            text = repeated[i]
         if i and step:
-            lines.extend([""] * min(8,max(0,round((center-sum(bands[i-1])/2)/step)-1)))
+            lines.extend([""] * min(8,max(0,round((centers[i]-centers[i-1])/step)-1)))
         lines.append(" "*indent + (text or "[ilegible]"))
-        if not complete or not text or detail != context or abs(len(text)-width) > 1:
+        if recovered or not complete or not text or detail != context or abs(len(text)-width) > 1:
+            if areas is not None:
+                other = context if text == detail else detail
+                if recovered:
+                    areas.append([len(lines)-1, indent, indent+1, left, a, right-left, b-a])
+                else:
+                    areas.append(conflict_area(text, other, pitch, anchored, left, right, a, b, len(lines)-1, indent))
             warnings.append(f"Línea visible {i+1} (y={a} px). Revisar con la imagen.")
     return lines, warnings
 
@@ -178,13 +270,19 @@ def main(model_dir, gpu, source, mode, output):
                     raise ValueError("Imagen de documento no admitida.")
                 image = original.convert("RGB")
             blocks, complete = model.read(image)
-            lines, warnings = (code if mode == "code" else document)(model, image, blocks)
+            areas = []
+            if mode == "code":
+                lines, warnings = code(model, image, blocks, areas=areas)
+            else:
+                lines, warnings = document(model, image, blocks)
             if not complete or not lines:
                 warnings.append("Lectura incompleta.")
             review.extend([stamp, *lines, *warnings, ""])
             transcript.extend(new_tail(previous, lines))
             previous = lines
             out.write(f'<section><h2>{stamp}</h2><pre>' + html.escape("\n".join(lines)) + "</pre>")
+            if areas:
+                out.write(f'<span hidden data-ocr-areas="{json.dumps(areas, separators=(",", ":"))}"></span>')
             if warnings:
                 out.write("<p>" + "<br>".join(map(html.escape, warnings)) + "</p>")
             out.write(f'<details open><summary>Vista original</summary><img loading="lazy" alt="{stamp}" src="data:image/jpeg;base64,{data}"></details></section>\n')

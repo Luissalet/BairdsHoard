@@ -183,6 +183,8 @@ kbd {
 .toast a { color: var(--hoard-accent); margin-left: 4px; }
 .dialog.wide { width: min(980px, 96vw); }
 .review-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.review-strip { overflow: auto; max-width: 100%; margin: 6px 0; }
+#review-lens { display: block; image-rendering: pixelated; }
 .review-columns #review-zoom { display: block; max-height: 52vh; overflow: auto; }
 #review-zoom { padding: 0; border: 0; background: none; cursor: zoom-in; text-align: left; }
 #review-zoom[aria-pressed="true"] img { width: auto; max-width: none; }

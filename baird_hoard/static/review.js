@@ -13,6 +13,7 @@ async function openDocumentReview(item) {
 async function loadReviewView(index) {
   const doc = reviewDoc;
   const request = ++reviewRequest;
+  reviewEl('focus').hidden = true;
   for (const control of ['index', 'next', 'text', 'ok', 'download']) reviewEl(control).disabled = true;
   reviewEl('count').textContent = 'Cargando vista…';
   try {
@@ -37,10 +38,70 @@ async function loadReviewView(index) {
     reviewEl('text').value = doc.entries[index]?.text ?? view.text;
     reviewEl('ok').checked = !!doc.entries[index]?.ok;
     updateReviewCounts();
+    prepareLens(view, request);
   } catch (err) {
     if (request === reviewRequest) { reviewDialog.close(); fail(err); }
   }
 }
+
+async function prepareLens(view, request) {
+  const image = reviewEl('image');
+  if (!view.areas?.length) return;
+  try { await image.decode(); } catch { return; }
+  if (request !== reviewRequest || !reviewDialog.open) return;
+  const areas = view.areas.filter(([, , , x, y]) => x < image.naturalWidth && y < image.naturalHeight);
+  if (!areas.length) return;
+  reviewDoc.areas = areas;
+  reviewDoc.original = view.text;
+  reviewEl('area').replaceChildren(...areas.map(([row, start, end], i) => {
+    let label = 'Línea ' + (row + 1);
+    if (start >= 0) label += end - start > 1 ? ' · columnas ' + (start + 1) + '–' + end : ' · columna ' + (start + 1);
+    return new Option(label, String(i));
+  }));
+  reviewEl('focus').hidden = false;
+  drawLens(reviewEl('lens'), true);
+}
+
+function drawLens(canvas, mark) {
+  const image = reviewEl('image');
+  const [, start, , x, y, w, h] = reviewDoc.areas[Number(reviewEl('area').value)];
+  const span = w || image.naturalWidth;
+  const padX = start < 0 ? 6 : Math.max(55, h * 4);
+  const left = Math.max(0, x - padX), top = Math.max(0, y - h);
+  const width = Math.min(image.naturalWidth, x + span + padX) - left;
+  const height = Math.min(image.naturalHeight, y + h * 2) - top;
+  const scale = Math.min(start < 0 ? 2 : 4, 4096 / width, 640 / height);
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(image, left, top, width, height, 0, 0, canvas.width, canvas.height);
+  if (mark && start >= 0) {
+    ctx.strokeStyle = '#e16c14'; ctx.lineWidth = 2;
+    ctx.strokeRect((x-left)*scale-1, (y-top)*scale-1, w*scale+2, h*scale+2);
+  }
+}
+
+reviewEl('area').addEventListener('change', () => {
+  drawLens(reviewEl('lens'), true);
+  const field = reviewEl('text');
+  if (field.value !== reviewDoc.original) return;
+  const [row, start, end] = reviewDoc.areas[Number(reviewEl('area').value)];
+  const lines = field.value.split('\n');
+  const offset = lines.slice(0, row).reduce((n, line) => n + line.length + 1, 0);
+  const units = n => Array.from(lines[row]).slice(0, n).join('').length;
+  field.setSelectionRange(offset + (start < 0 ? 0 : units(start)), offset + (end < 0 ? lines[row].length : units(end)));
+});
+
+reviewEl('crop').addEventListener('click', () => {
+  const canvas = document.createElement('canvas');
+  drawLens(canvas, false);
+  const [row] = reviewDoc.areas[Number(reviewEl('area').value)];
+  const stamp = reviewDoc.stamps[reviewDoc.index].replace(':', '-');
+  const a = document.createElement('a');
+  a.download = reviewDoc.name.replace(/\.html$/i, '') + ' - ' + stamp + ' - línea ' + (row+1) + '.png';
+  a.href = canvas.toDataURL('image/png'); a.click();
+});
 
 function updateReviewCounts() {
   const doc = reviewDoc;

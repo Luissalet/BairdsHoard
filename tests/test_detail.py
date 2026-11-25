@@ -13,6 +13,38 @@ from baird_hoard.document_review import original_view
 from baird_hoard.errors import BairdError
 
 
+def test_code_review_locates_disagreement_and_reads_old_line_warnings(tmp_path):
+    from baird_hoard.detail_worker import conflict_area
+    focus = conflict_area("safe_load", "save_load", 7, True, 0, 63, 21, 32, 2, 0)
+    assert focus == [2, 2, 3, 14, 21, 7, 11]
+    assert conflict_area("safe_load", "save_load", 7, False, 0, 63, 21, 32, 2, 0)[1:3] == [-1, -1]
+    doc = tmp_path / "sample.html"
+    frame = '<section><h2>00:00.0</h2><pre>x\n\nsafe_load</pre>{}<img src="data:image/jpeg;base64,/9j/"></section>\n'
+    doc.write_text(frame.format('<span hidden data-ocr-areas="[[2,2,3,14,21,7,11],[9,2,3,14,21,7,11]]"></span>'), encoding="utf-8")
+    assert original_view(doc)["areas"] == [focus]
+    doc.write_text(frame.format('<p>Línea visible 2 (y=21 px). Revisar con la imagen.</p>'), encoding="utf-8")
+    assert original_view(doc)["areas"] == [[2,-1,-1,0,21,0,22]]
+
+
+def test_pitch_rejects_grid_harmonic_only_with_supporting_lines():
+    np = pytest.importorskip("numpy")
+    from baird_hoard.detail_worker import estimate_pitch
+    frequencies = 1 / np.array([21., 7.])
+    assert estimate_pitch([[1., .3]], frequencies, [6.9, 7., 7.1, 14.]) == (7., True)
+    assert estimate_pitch([[1., .3]], frequencies, [6.9]) == (21., False)
+
+
+def test_delimiter_recovery_needs_a_matching_glyph_in_another_row():
+    np = pytest.importorskip("numpy")
+    from baird_hoard.detail_worker import repeated_delimiters
+    ink = np.zeros((60,100))
+    ink[5:15,4:8] = ink[25:35,4:8] = 100
+    ink[45:55,4] = 100
+    rows = [(y,y+10,4,8,"","",True) for y in (5,25,45)]
+    blocks = [("text", (40, 82, 80, 250), "}")]
+    assert repeated_delimiters(ink, rows, blocks, (100,60), 7, 20) == {1: "}"}
+
+
 def test_only_embedded_frames_with_baird_timestamps_are_read(tmp_path):
     doc = tmp_path / "sample.html"
     doc.write_text('<img src="https://example.invalid/any">\n<section><h2>00:01.5</h2><pre>1\n2</pre>'

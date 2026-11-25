@@ -109,6 +109,13 @@
         <button class="btn small" id="review-next">Siguiente pendiente</button>
       </div>
       <p id="review-notes" class="row-note"></p>
+      <div id="review-focus" hidden>
+        <div class="ann-bar">
+          <label>Zona para cotejar <select id="review-area"></select></label>
+          <button class="btn small" id="review-crop" type="button">Guardar recorte</button>
+        </div>
+        <div class="review-strip"><canvas id="review-lens" aria-label="Recorte ampliado del fotograma original"></canvas></div>
+      </div>
       <div class="review-columns">
         <button id="review-zoom" type="button" aria-label="Ampliar vista original" aria-pressed="false"><img id="review-image" alt="Vista original de la grabación"></button>
         <label>Texto de esta vista<textarea id="review-text" spellcheck="false" wrap="off"></textarea></label>
