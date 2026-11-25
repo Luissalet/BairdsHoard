@@ -173,7 +173,8 @@ class Transcriber:
             ) as out:
                 partial = Path(out.name)
                 transcript = []
-                out.write(HEADER + "<p>" + html.escape(video.stem) + '</p><p><a href="#texto">Ir a la descarga de texto</a></p>\n')
+                out.write(HEADER + '<p data-baird-video="' + html.escape(video.name, quote=True) + '">' +
+                          html.escape(video.stem) + '</p><p><a href="#texto">Ir a la descarga de texto</a></p>\n')
                 frames = extract_frames(self.library.ffmpeg, source, finished, Path(tmp), region)
                 try:
                     for frame in frames:

@@ -379,6 +379,7 @@ function card(item) {
       <div class="acts">
         ${isDocument ? '<button class="btn small" data-act="open">Abrir</button>' : ''}
         ${isDocument ? '<button class="btn small" data-act="review">Revisar texto</button>' : ''}
+        ${isVideo && /\.mp4$/i.test(item.name) && state.status?.transcription?.detail?.available ? '<button class="btn small" data-act="transcribe-video">Transcribir grabación</button>' : ''}
         ${isDocument && state.status?.transcription?.detail?.available && !item.name.startsWith('Lectura detallada ') ? '<button class="btn small" data-act="reread">Releer con UnlimitedOCR</button>' : ''}
         <button class="btn small" data-act="copy" title="Copiar el archivo (pega con Ctrl+V)">Copiar</button>
         <button class="btn small accent" data-act="faustus" title="Abrir un chat de Faustus con este archivo adjunto">Faustus</button>
@@ -430,6 +431,10 @@ async function act(what, item) {
   try {
     if (what === 'open') { window.open(item.url, '_blank', 'noopener'); }
     else if (what === 'review') { await openDocumentReview(item); }
+    else if (what === 'transcribe-video') {
+      await callTool('transcribe_reread', {name:item.name, mode:'auto'});
+      await refreshStatus();
+    }
     else if (what === 'reread') {
       const dialog = $('reread-dialog'); dialog.returnValue = 'cancel';
       const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once:true}));

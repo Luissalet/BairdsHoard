@@ -348,7 +348,7 @@ TOOLS: list[Tool] = [
          TranscribeArgs, ann(draft_safe=True), lambda s, a: s.transcriber.start(_region(a), a.detail), timeout_s=30),
     Tool("transcribe_stop", _d("Finish the document and its recording. Poll capture_status.transcription for the HTML path."),
          Empty, ann(draft_safe=True), lambda s, a: s.transcriber.stop()),
-    Tool("transcribe_reread", _d("Reread the original frames of a saved Baird HTML document with local UnlimitedOCR. Poll capture_status.transcription.detail."),
+    Tool("transcribe_reread", _d("Transcribe a library MP4 or reread a Baird HTML with local UnlimitedOCR. Automatic video mode reconstructs numbered files. Poll capture_status.transcription.detail."),
          RereadArgs, ann(draft_safe=True), lambda s, a: s.transcriber.detail.start(s.library.path_of(a.name), a.mode)),
     Tool("transcribe_cancel_reread", _d("Cancel the current GPU rereading job. The original recording and Windows transcription are retained."),
          Empty, ann(draft_safe=True), lambda s, a: s.transcriber.detail.cancel()),

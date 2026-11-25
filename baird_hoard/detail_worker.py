@@ -1,12 +1,15 @@
 """One offline UnlimitedOCR job. Heavy dependencies belong to the configured GPU runtime."""
 import base64
+from contextlib import ExitStack, closing
 import hashlib
 import html
 import io
 import json
+import os
 from pathlib import Path
 import re
 import sys
+import tempfile
 
 from .transcribe import HEADER
 
@@ -196,7 +199,7 @@ def repeated_delimiters(ink, readings, blocks, size, pitch, step):
     return recovered
 
 
-def code(model, image, blocks, *, areas=None, top_offset=0):
+def code(model, image, blocks, *, areas=None, top_offset=0, positions=None):
     import numpy as np
     from scipy import ndimage as nd
     from PIL import ImageFilter
@@ -283,6 +286,8 @@ def code(model, image, blocks, *, areas=None, top_offset=0):
                 grid = word_grid(ink, a, b, left, right, pitch)
                 line = apply_word_grid(line, grid, lambda bounds: spaced_read(model, image, a, b, bounds))
         lines.append(line)
+        if positions is not None:
+            positions.append((a+top_offset, b+top_offset, len(lines)-1))
         if recovered or line != original or not complete or not text or detail != context or abs(len(text)-width) > 1:
             if areas is not None:
                 other = context if text == detail else detail
@@ -306,10 +311,11 @@ def new_tail(previous, current):
     return current
 
 
-def read_view(model, image, mode):
+def read_view(model, image, mode, *, editor=None):
     from .auto_read import code_layout, numbered_editor
     picture = image
-    box = numbered_editor(image) if mode == "auto" else None
+    layout = {}
+    box = numbered_editor(image, geometry=layout) if mode == "auto" else None
     blocks = None
     if box is not None:
         panel = image.crop(box)
@@ -320,13 +326,16 @@ def read_view(model, image, mode):
         blocks, complete = model.read(image)
     areas = []
     if mode == "code" or (mode == "auto" and code_layout(blocks)):
-        lines, warnings = code(model, picture, blocks, areas=areas,
+        positions = []
+        lines, warnings = code(model, picture, blocks, areas=areas, positions=positions,
                                top_offset=box[1] if picture is not image else 0)
         if picture is not image:
             for area in areas:
                 area[3] += box[0]
                 area[4] += box[1]
         if lines:
+            if editor is not None and picture is not image:
+                editor.update(layout, box=box, positions=positions)
             return lines, warnings, areas, complete
         # A code-looking caption or an unresolved grid still has a document-level reading.
         if mode == "code":
@@ -337,26 +346,84 @@ def read_view(model, image, mode):
     return lines, warnings, [], complete
 
 
-def main(model_dir, gpu, source, mode, output):
+def document_frames(source):
     from PIL import Image
+    for stamp, data in views(source):
+        with Image.open(io.BytesIO(base64.b64decode(data, validate=True))) as original:
+            if original.format != "JPEG" or original.width * original.height > 34_000_000:
+                raise ValueError("Imagen de documento no admitida.")
+            minutes, seconds = stamp.split(":")
+            yield stamp, 60*int(minutes) + float(seconds), original.convert("RGB"), data
+
+
+def video_frames(source, ffmpeg):
+    from .recorded_views import recorded_views
+    with closing(recorded_views(source, ffmpeg)) as frames:
+        for seconds, image in frames:
+            jpeg = io.BytesIO()
+            image.save(jpeg, format="JPEG", quality=92)
+            stamp = f"{int(seconds//60):02d}:{seconds%60:04.1f}"
+            yield stamp, seconds, image, base64.b64encode(jpeg.getvalue()).decode("ascii")
+
+
+def linked_video(source):
+    if source.suffix.lower() == ".mp4":
+        return source.name
+    with source.open(encoding="utf-8-sig") as stream:
+        heading = stream.read(8192).partition("<section>")[0]
+    tag = re.search(r'<p data-baird-video="([^"]{1,250})">', heading)
+    if tag:
+        name = html.unescape(tag[1])
+        if Path(name).name == name and name.lower().endswith(".mp4") and (source.parent/name).is_file():
+            return name
+    return None
+
+
+def main(model_dir, gpu, source, mode, output, ffmpeg=None):
+    from .source_rebuild import Reconstruction, inspect_editor
+    from .textmap import TextReader
+    from .errors import BairdError
+    video = Path(source).suffix.lower() == ".mp4"
     model = Model(model_dir, gpu)
     previous, transcript, review = [], [], []
     count = 0
-    with Path(output).open("w", encoding="utf-8") as out:
+    with ExitStack() as stack:
+        out = stack.enter_context(Path(output).open("w", encoding="utf-8"))
+        rebuild = mode == "auto"
+        if rebuild:
+            folder = Path(os.environ.get("BAIRD_OCR_SCRATCH") or stack.enter_context(tempfile.TemporaryDirectory()))
+            reader = TextReader()
+            stack.callback(reader.stop)
+            reconstruction = Reconstruction()
+        source_frames = video_frames(Path(source), ffmpeg) if video else document_frames(Path(source))
+        frames = stack.enter_context(closing(source_frames))
         out.write(HEADER + "<p>Segunda lectura local con UnlimitedOCR · " + html.escape(Path(source).name) +
                   '</p><p><a href="#texto-automatico">Ir al TXT automático</a></p>\n')
-        for stamp, data in views(Path(source)):
-            with Image.open(io.BytesIO(base64.b64decode(data, validate=True))) as original:
-                if original.format != "JPEG" or original.width * original.height > 34_000_000:
-                    raise ValueError("Imagen de documento no admitida.")
-                image = original.convert("RGB")
-            lines, warnings, areas, complete = read_view(model, image, mode)
+        if rebuild:
+            out.write('<p><a href="#archivos">Ver archivos reconstruidos</a></p>\n')
+        for stamp, seconds, image, data in frames:
+            editor = {}
+            lines, warnings, areas, complete = read_view(model, image, mode, editor=editor)
+            if rebuild:
+                name, hint, rows = "", "", {}
+                if editor:
+                    try:
+                        name, hint, rows = inspect_editor(image, editor, reader, folder, count, lines, areas)
+                    except BairdError:
+                        pass
+                    if not rows:
+                        warnings.append("No se pudieron verificar números de línea para este tramo.")
+                    elif editor.get("unplaced"):
+                        warnings.append(f"{editor['unplaced']} renglones visibles sin número confirmado. Se conservan en esta vista.")
+                reconstruction.add(stamp, seconds, name, hint, rows)
             if not complete or not lines:
                 warnings.append("Lectura incompleta.")
             review.extend([stamp, *lines, *warnings, ""])
             transcript.extend(new_tail(previous, lines))
             previous = lines
             out.write(f'<section><h2>{stamp}</h2><pre>' + html.escape("\n".join(lines)) + "</pre>")
+            if rebuild:
+                out.write(f'<span id="vista-{stamp}"></span>')
             if areas:
                 out.write(f'<span hidden data-ocr-areas="{json.dumps(areas, separators=(",", ":"))}"></span>')
             if warnings:
@@ -365,7 +432,9 @@ def main(model_dir, gpu, source, mode, output):
             count += 1
             print(json.dumps({"views":count}), flush=True)
         if not count:
-            raise ValueError("El HTML no contiene vistas originales de Baird.")
+            raise ValueError("El archivo no contiene vistas que se puedan transcribir.")
+        if rebuild:
+            reconstruction.export(out, linked_video(Path(source)))
         plain = base64.b64encode("\n".join(transcript).encode("utf-8")).decode("ascii")
         checked = base64.b64encode("\n".join(review).encode("utf-8")).decode("ascii")
         out.write(f'<p><a download="lectura-por-tiempo.txt" href="data:text/plain;charset=utf-8;base64,{checked}">Descargar vistas con avisos</a></p>')

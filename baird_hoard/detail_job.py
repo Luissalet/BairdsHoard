@@ -36,8 +36,10 @@ class DetailJob:
             return {**self.report, "available": bool(self.runtime)}
 
     def start(self, source: Path, mode: str):
-        if source.suffix.lower() != ".html" or mode not in ("auto", "document", "code"):
-            raise BairdError("invalid", "Elige una transcripción HTML de Baird y un modo de lectura.")
+        if source.suffix.lower() not in (".mp4", ".html") or mode not in ("auto", "document", "code"):
+            raise BairdError("invalid", "Elige una grabación MP4 o una transcripción HTML de Baird.")
+        if source.suffix.lower() == ".mp4":
+            self.library._need_ffmpeg()
         with self.lock:
             if not self.runtime or self.closed:
                 raise BairdError("unavailable", "UnlimitedOCR local no está disponible.")
@@ -58,6 +60,7 @@ class DetailJob:
 
     def _run(self, source, mode):
         partial = None
+        scratch = None
         final = {}
         try:
             path = self.library._new_path("Lectura detallada", ".html")
@@ -72,8 +75,14 @@ class DetailJob:
                         raise RuntimeError("No hay una GPU disponible para UnlimitedOCR.")
                     args = [str(python), "-X", "utf8", "-m", "baird_hoard.detail_worker", str(model),
                             str(lease.gpu), str(source), mode, str(partial)]
+                    worker_env = {**os.environ, "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+                    if mode == "auto":
+                        scratch = tempfile.TemporaryDirectory(prefix="baird-ocr-")
+                        worker_env["BAIRD_OCR_SCRATCH"] = scratch.name
+                    if source.suffix.lower() == ".mp4":
+                        args.append(self.library.ffmpeg)
                     proc = self.proc = subprocess.Popen(args, cwd=Path(__file__).resolve().parents[1],
-                        env={**os.environ, "HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+                        env=worker_env,
                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                         encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
                     bind_to_app(proc)
@@ -125,6 +134,8 @@ class DetailJob:
             try:
                 if partial:
                     partial.unlink(missing_ok=True)
+                if scratch:
+                    scratch.cleanup()
             finally:
                 with self.lock:
                     self.proc = None

@@ -21,7 +21,7 @@ def code_layout(blocks):
     return signals >= 2 and signals >= len(rows)*.38
 
 
-def numbered_editor(image):
+def numbered_editor(image, *, geometry=None):
     """Find a tightly aligned number gutter and its physical separator; never crop on syntax alone."""
     import numpy as np
     from scipy import ndimage as nd
@@ -103,5 +103,8 @@ def numbered_editor(image):
             last = occupied[margin][-1]
         x1 = min(image.width,x0+int(last)+round(gap))
         if x1-x0>=150:
+            if geometry is not None:
+                geometry.update(gutter=(left, right), step=float(gap),
+                                center=float(run[0][0]+first*gap))
             return x0,top,x1,bottom
     return None
