@@ -61,6 +61,42 @@ def test_detailed_export_only_deduplicates_contiguous_overlap():
     assert new_tail(earlier, earlier) == []
 
 
+def test_automatic_reader_keeps_a_figure_with_its_labels():
+    from baird_hoard.auto_read import code_layout
+    blocks = [("text", (10,20,850,80), "def example():\n    return data")]
+    assert code_layout(blocks)
+    assert not code_layout(blocks + [("image", (10,90,850,920), "")])
+
+
+def test_character_grid_recovers_spacing_and_keeps_ambiguous_letters():
+    from baird_hoard.optical_code import apply_word_grid, repair_word
+    assert apply_word_grid("    abcd", ("xx  xx", []), lambda _: "") == "    ab  cd"
+    assert repair_word("abcde", "a\x00de") == "abcde"
+    assert repair_word("misspelled", "spelled") == "spelled"
+
+
+def test_numbered_editor_preserves_code_against_separator():
+    pytest.importorskip("scipy")
+    Image = pytest.importorskip("PIL.Image")
+    from PIL import ImageDraw, ImageFont
+    from baird_hoard.auto_read import numbered_editor
+    try:
+        font = ImageFont.truetype("consola.ttf", 17)
+    except OSError:
+        pytest.skip("Consolas unavailable")
+    image = Image.new("RGB", (980,460), "white")
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((125,0,126,459), fill="#808080")
+    for i in range(15):
+        y = 17 + 27*i
+        draw.text((65,y), str(10+i), font=font, fill="black")
+        draw.text((128,y), f"record_{i} = calculate()", font=font, fill="black")
+    box = numbered_editor(image)
+    assert box is not None
+    before = image.crop((127,box[1],box[0],box[3])).convert("L")
+    assert before.width == 0 or before.getextrema() == (255,255)
+
+
 def test_review_reads_one_original_and_prefers_full_text(tmp_path):
     doc = tmp_path / "source.html"
     doc.write_text('<section><h2>00:01.0</h2><pre>added</pre><details><pre>  x &lt; y\nline</pre></details>'

@@ -435,7 +435,7 @@ async function act(what, item) {
       const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once:true}));
       dialog.showModal();
       const mode = await choice;
-      if (mode === 'document' || mode === 'code') {
+      if (['auto', 'document', 'code'].includes(mode)) {
         await callTool('transcribe_reread', {name:item.name, mode});
         await refreshStatus();
       }
@@ -583,8 +583,11 @@ $('btn-transcribe').addEventListener('click', async () => {
       const detail = state.status?.transcription?.detail;
       $('ocr-mode-row').hidden = !detail?.available;
       $('ocr-mode-hint').hidden = !detail?.available;
+      $('ocr-mode-hint').textContent = detail?.state === 'running'
+        ? 'Hay otra lectura en curso. Esta captura usará el OCR de Windows.'
+        : 'La lectura automática usa la GPU local después de guardar. Puedes marcar una zona para excluir los menús.';
       $('ocr-mode').disabled = !detail?.available || detail.state === 'running';
-      if ($('ocr-mode').disabled) $('ocr-mode').value = 'off';
+
       dialog.returnValue = 'cancel';
       const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once: true}));
       dialog.showModal();
@@ -592,7 +595,7 @@ $('btn-transcribe').addEventListener('click', async () => {
       if (mode !== 'full' && mode !== 'region') return;
       const region = mode === 'region' ? await pickRegion('Marca el documento que quieres transcribir · Esc cancela') : null;
       if (mode === 'region' && !region) return;
-      await callTool('transcribe_start', {region, detail: $('ocr-mode').value});
+      await callTool('transcribe_start', {region, detail: $('ocr-mode').disabled ? 'off' : $('ocr-mode').value});
     }
   } catch (err) { fail(err); }
   finally { state.transcribeBusy = false; await refreshStatus(); }

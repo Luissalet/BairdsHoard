@@ -55,7 +55,7 @@ class SnapshotArgs(BaseModel):
 
 class TranscribeArgs(BaseModel):
     region: Optional[RegionArg] = None
-    detail: Literal["off", "document", "code"] = "off"
+    detail: Literal["auto", "off", "document", "code"] = "auto"
 
 
 class SearchArgs(BaseModel):
@@ -77,7 +77,7 @@ class NameArg(BaseModel):
 
 
 class RereadArgs(NameArg):
-    mode: Literal["document", "code"] = "document"
+    mode: Literal["auto", "document", "code"] = "auto"
 
 
 class LookFileArgs(NameArg):

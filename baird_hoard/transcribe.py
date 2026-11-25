@@ -118,10 +118,13 @@ class Transcriber:
             result["detail"] = self.detail.status()
             return result
 
-    def start(self, region=None, detail="off"):
-        if detail != "off" and not self.detail.status()["available"]:
+    def start(self, region=None, detail="auto"):
+        status = self.detail.status()
+        if detail == "auto" and (not status["available"] or status["state"] == "running"):
+            detail = "off"
+        if detail != "off" and not status["available"]:
             raise BairdError("unavailable", "UnlimitedOCR local no está configurado.")
-        if detail != "off" and self.detail.status()["state"] == "running":
+        if detail != "off" and status["state"] == "running":
             raise BairdError("busy", "Hay una segunda lectura en curso.")
         region = parse_region(region, self.library.input_size())
         with self._lock:

@@ -92,6 +92,23 @@ def detail_text(model, image, box):
     return " ".join(t for _, _, t in blocks if t), complete
 
 
+def spaced_read(model, image, top, bottom, bounds):
+    from PIL import Image, ImageOps
+    gap = max(8, bottom-top)
+    width = sum(right-left for left,right in bounds)+gap*(len(bounds)-1)
+    if width <= 0 or width > 8192:
+        return ""
+    # Sample the margin so dark themes keep their original contrast.
+    color = image.getpixel((max(0,bounds[0][0]-2), max(0,top-2)))
+    sheet = Image.new("RGB", (width, bottom-top+6), color)
+    x = 0
+    for left, right in bounds:
+        sheet.paste(image.crop((left,top,right,bottom)), (x,3))
+        x += right-left+gap
+    blocks, complete = model.read(ImageOps.expand(sheet, border=(12,10), fill=color))
+    return " ".join(t for _,_,t in blocks if t) if complete else ""
+
+
 def document(model, image, blocks):
     figures = [box for kind, box, _ in blocks if kind in ("image", "figure", "chart")]
     lines = [s for _, _, text in blocks for s in text.splitlines()]
@@ -179,7 +196,7 @@ def repeated_delimiters(ink, readings, blocks, size, pitch, step):
     return recovered
 
 
-def code(model, image, blocks, *, areas=None):
+def code(model, image, blocks, *, areas=None, top_offset=0):
     import numpy as np
     from scipy import ndimage as nd
     from PIL import ImageFilter
@@ -221,7 +238,30 @@ def code(model, image, blocks, *, areas=None):
     centers = [(a+b)/2 for a,b,*_ in readings]
     gaps = np.diff(centers)
     step = np.median(gaps[gaps <= np.median(gaps)]) if len(gaps) else 0
+    from .optical_code import apply_word_grid, glyph_corrections, quote_run, reconcile, restore_quotes, word_grid
+    short_quotes = set()
+    if step and anchored:
+        for sl in nd.find_objects(nd.label(rows)[0]):
+            a, b = sl[0].start, sl[0].stop
+            if not (0 < a and b < image.height and b-a < 4):
+                continue
+            nearest = min(centers, key=lambda y: abs(y-a))
+            slots = round((a-nearest)/step)
+            offset = nearest+slots*step-a
+            if not slots or not 0 < offset < step*.48:
+                continue
+            xs = np.flatnonzero((ink[a:b]>35).any(axis=0))
+            if len(xs)<2:
+                continue
+            left,right = int(xs[0]),int(xs[-1]+1)
+            count = quote_run(ink[a:b,left:right],pitch)
+            if count and abs((right-left)/pitch+.5-count)<.5:
+                short_quotes.add(a)
+                readings.append((a,b,left,right,'"'*count,'',True))
+        readings.sort()
+        centers = [(a+b)/2 for a,b,*_ in readings]
     repeated = repeated_delimiters(ink, readings, blocks, image.size, pitch, step) if anchored else {}
+    optical = glyph_corrections(ink, readings, pitch, step) if anchored else {}
     for i, (a,b,left,right,detail,context,complete) in enumerate(readings):
         # Glyphs on a subpixel cell boundary can begin one raster pixel before it.
         indent = int((left + min(1.0, pitch * .12))/pitch)
@@ -234,15 +274,25 @@ def code(model, image, blocks, *, areas=None):
             text = repeated[i]
         if i and step:
             lines.extend([""] * min(8,max(0,round((centers[i]-centers[i-1])/step)-1)))
-        lines.append(" "*indent + (text or "[ilegible]"))
-        if recovered or not complete or not text or detail != context or abs(len(text)-width) > 1:
+        original = " "*indent + (text or "[ilegible]")
+        line = reconcile(original, optical[i]) if i in optical and a not in short_quotes else original
+        if anchored and a not in short_quotes:
+            content = line.lstrip()
+            line = line[:len(line)-len(content)] + restore_quotes(content, ink[a:b,left:right], pitch)
+            if line.strip() and not line.endswith("[ilegible]") and (len(line.split()) >= 2 or " " not in text):
+                grid = word_grid(ink, a, b, left, right, pitch)
+                line = apply_word_grid(line, grid, lambda bounds: spaced_read(model, image, a, b, bounds))
+        lines.append(line)
+        if recovered or line != original or not complete or not text or detail != context or abs(len(text)-width) > 1:
             if areas is not None:
                 other = context if text == detail else detail
-                if recovered:
+                if line != original:
+                    areas.append([len(lines)-1, -1, -1, left, a, right-left, b-a])
+                elif recovered:
                     areas.append([len(lines)-1, indent, indent+1, left, a, right-left, b-a])
                 else:
                     areas.append(conflict_area(text, other, pitch, anchored, left, right, a, b, len(lines)-1, indent))
-            warnings.append(f"Línea visible {i+1} (y={a} px). Revisar con la imagen.")
+            warnings.append(f"Línea visible {i+1} (y={a+top_offset} px). Revisar con la imagen.")
     return lines, warnings
 
 
@@ -256,6 +306,37 @@ def new_tail(previous, current):
     return current
 
 
+def read_view(model, image, mode):
+    from .auto_read import code_layout, numbered_editor
+    picture = image
+    box = numbered_editor(image) if mode == "auto" else None
+    blocks = None
+    if box is not None:
+        panel = image.crop(box)
+        candidate, complete = model.read(panel)
+        if code_layout(candidate):
+            picture, blocks = panel, candidate
+    if blocks is None:
+        blocks, complete = model.read(image)
+    areas = []
+    if mode == "code" or (mode == "auto" and code_layout(blocks)):
+        lines, warnings = code(model, picture, blocks, areas=areas,
+                               top_offset=box[1] if picture is not image else 0)
+        if picture is not image:
+            for area in areas:
+                area[3] += box[0]
+                area[4] += box[1]
+        if lines:
+            return lines, warnings, areas, complete
+        # A code-looking caption or an unresolved grid still has a document-level reading.
+        if mode == "code":
+            return lines, warnings, areas, complete
+        if picture is not image:
+            blocks, complete = model.read(image)
+    lines, warnings = document(model, image, blocks)
+    return lines, warnings, [], complete
+
+
 def main(model_dir, gpu, source, mode, output):
     from PIL import Image
     model = Model(model_dir, gpu)
@@ -263,18 +344,13 @@ def main(model_dir, gpu, source, mode, output):
     count = 0
     with Path(output).open("w", encoding="utf-8") as out:
         out.write(HEADER + "<p>Segunda lectura local con UnlimitedOCR · " + html.escape(Path(source).name) +
-                  "</p><p>Texto automático. Comprueba los símbolos, la sangría y los rótulos con la imagen.</p>\n")
+                  '</p><p><a href="#texto-automatico">Ir al TXT automático</a></p>\n')
         for stamp, data in views(Path(source)):
             with Image.open(io.BytesIO(base64.b64decode(data, validate=True))) as original:
                 if original.format != "JPEG" or original.width * original.height > 34_000_000:
                     raise ValueError("Imagen de documento no admitida.")
                 image = original.convert("RGB")
-            blocks, complete = model.read(image)
-            areas = []
-            if mode == "code":
-                lines, warnings = code(model, image, blocks, areas=areas)
-            else:
-                lines, warnings = document(model, image, blocks)
+            lines, warnings, areas, complete = read_view(model, image, mode)
             if not complete or not lines:
                 warnings.append("Lectura incompleta.")
             review.extend([stamp, *lines, *warnings, ""])
@@ -293,7 +369,7 @@ def main(model_dir, gpu, source, mode, output):
         plain = base64.b64encode("\n".join(transcript).encode("utf-8")).decode("ascii")
         checked = base64.b64encode("\n".join(review).encode("utf-8")).decode("ascii")
         out.write(f'<p><a download="lectura-por-tiempo.txt" href="data:text/plain;charset=utf-8;base64,{checked}">Descargar vistas con avisos</a></p>')
-        out.write(f'<p><a download="transcripcion.txt" href="data:text/plain;charset=utf-8;base64,{plain}">Descargar texto automático</a></p></html>')
+        out.write(f'<p id="texto-automatico"><a download="transcripcion.txt" href="data:text/plain;charset=utf-8;base64,{plain}">Descargar texto automático</a></p></html>')
 
 
 if __name__ == "__main__":

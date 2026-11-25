@@ -89,12 +89,13 @@
       <p>Se guardan la grabación completa y un documento con el texto, las fotos y los esquemas.</p>
       <label class="row" id="ocr-mode-row" hidden>Segunda lectura
         <select id="ocr-mode">
+          <option value="auto" selected>Automática · código, texto y esquemas</option>
           <option value="off">Solo Windows</option>
           <option value="document">UnlimitedOCR · documento y esquemas</option>
           <option value="code">UnlimitedOCR · bloque de código</option>
         </select>
       </label>
-      <p id="ocr-mode-hint" hidden>La segunda lectura usa la GPU local después de guardar. Para código, selecciona desde el margen izquierdo del editor y excluye los números de línea.</p>
+      <p id="ocr-mode-hint" hidden>La lectura automática usa la GPU local después de guardar. Puedes marcar una zona para excluir los menús.</p>
       <button class="btn primary" value="full">Toda la pantalla</button>
       <button class="btn" value="region">Elegir zona</button>
       <button class="btn ghost" value="cancel">Cancelar</button>
@@ -130,8 +131,9 @@
   <dialog id="reread-dialog" class="dialog">
     <form method="dialog">
       <h2>Segunda lectura con UnlimitedOCR</h2>
-      <p>Elige código si las vistas contienen solo el bloque, desde su margen izquierdo. La GPU local procesará una vista cada vez.</p>
-      <button class="btn primary" value="document">Documento y esquemas</button>
+      <p>Baird elige la lectura para cada vista y guarda el texto con sus imágenes.</p>
+      <button class="btn primary" value="auto">Automática</button>
+      <button class="btn" value="document">Documento y esquemas</button>
       <button class="btn" value="code">Bloque de código</button>
       <button class="btn ghost" value="cancel">Cancelar</button>
     </form>

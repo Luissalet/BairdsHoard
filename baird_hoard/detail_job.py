@@ -36,7 +36,7 @@ class DetailJob:
             return {**self.report, "available": bool(self.runtime)}
 
     def start(self, source: Path, mode: str):
-        if source.suffix.lower() != ".html" or mode not in ("document", "code"):
+        if source.suffix.lower() != ".html" or mode not in ("auto", "document", "code"):
             raise BairdError("invalid", "Elige una transcripción HTML de Baird y un modo de lectura.")
         with self.lock:
             if not self.runtime or self.closed:
