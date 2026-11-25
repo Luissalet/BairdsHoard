@@ -55,6 +55,7 @@ class SnapshotArgs(BaseModel):
 
 class TranscribeArgs(BaseModel):
     region: Optional[RegionArg] = None
+    detail: Literal["off", "document", "code"] = "off"
 
 
 class SearchArgs(BaseModel):
@@ -73,6 +74,10 @@ class ListArgs(BaseModel):
 
 class NameArg(BaseModel):
     name: str = Field(..., min_length=1, max_length=260, description="File name as media_list shows it.")
+
+
+class RereadArgs(NameArg):
+    mode: Literal["document", "code"] = "document"
 
 
 class LookFileArgs(NameArg):
@@ -340,9 +345,13 @@ TOOLS: list[Tool] = [
     Tool("record_stop", _d("Stop the recording; the MP4 appears in the library a moment later.", synonyms="parar grabación"),
          Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.stop()),
     Tool("transcribe_start", _d("Record the screen and transcribe the document locally while it scrolls. Optionally select its region."),
-         TranscribeArgs, ann(draft_safe=True), lambda s, a: s.transcriber.start(_region(a)), timeout_s=30),
+         TranscribeArgs, ann(draft_safe=True), lambda s, a: s.transcriber.start(_region(a), a.detail), timeout_s=30),
     Tool("transcribe_stop", _d("Finish the document and its recording. Poll capture_status.transcription for the HTML path."),
          Empty, ann(draft_safe=True), lambda s, a: s.transcriber.stop()),
+    Tool("transcribe_reread", _d("Reread the original frames of a saved Baird HTML document with local UnlimitedOCR. Poll capture_status.transcription.detail."),
+         RereadArgs, ann(draft_safe=True), lambda s, a: s.transcriber.detail.start(s.library.path_of(a.name), a.mode)),
+    Tool("transcribe_cancel_reread", _d("Cancel the current GPU rereading job. The original recording and Windows transcription are retained."),
+         Empty, ann(draft_safe=True), lambda s, a: s.transcriber.detail.cancel()),
     Tool("media_list", _d("List screenshots, clips and recordings, newest first, with their paths."),
          ListArgs, ann(read_only=True), lambda s, a: {"items": s.library.list(a.kind, a.limit), "folder": s.settings.media_dir()}),
     Tool("media_look", _d("Look at a saved screenshot, or a frame of a saved video, as an image."),

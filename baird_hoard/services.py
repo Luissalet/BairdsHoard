@@ -67,6 +67,7 @@ class Services:
             self._start_hotkeys()
 
     def stop(self) -> None:
+        self.transcriber.detail.cancel(closing=True)
         self.copilot.close()
         if self.library.recorder.state == "recording":
             try:

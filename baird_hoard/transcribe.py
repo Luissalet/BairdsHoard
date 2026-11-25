@@ -11,6 +11,7 @@ import threading
 import time
 from pathlib import Path
 
+from .detail_job import DetailJob
 from .errors import BairdError
 from .media import Library, jpeg_size
 from .native import NO_WINDOW
@@ -25,7 +26,7 @@ HEADER = """<!doctype html><html lang="es"><meta charset="utf-8">
 <title>Transcripción de pantalla</title>
 <style>body{font:17px/1.5 system-ui,sans-serif;max-width:62rem;margin:auto;padding:2rem}
 h1{font-size:1.6rem}h2{font:600 1rem system-ui;color:#485566}section{border-top:1px solid #ccc;margin-top:2rem}
-img{max-width:100%;height:auto}pre{font:inherit;white-space:pre-wrap}details{margin:1rem 0}
+img{max-width:100%;height:auto}pre{font:0.93rem/1.5 ui-monospace,monospace;white-space:pre-wrap}details{margin:1rem 0}
 @media print{section{break-before:page}details{break-inside:avoid}}</style>
 <h1>Transcripción de pantalla</h1>
 """
@@ -34,7 +35,7 @@ img{max-width:100%;height:auto}pre{font:inherit;white-space:pre-wrap}details{mar
 def new_lines(previous: list[str], current: list[str]) -> list[str]:
     """Keep new text in reading order. Match runs, so a repeated word elsewhere still makes it into the document."""
     def keys(lines):
-        return [" ".join(s.split()) for s in lines]
+        return [s.rstrip() for s in lines]
 
     matches = difflib.SequenceMatcher(None, keys(previous), keys(current), autojunk=False)
     covered = set()
@@ -104,6 +105,7 @@ def extract_frames(ffmpeg: str, source: Path, finished: threading.Event, folder:
 class Transcriber:
     def __init__(self, library: Library):
         self.library = library
+        self.detail = DetailJob(library)
         self._lock = threading.RLock()
         self._report = {"state": "idle", "views": 0}
         self._finished: threading.Event | None = None
@@ -113,9 +115,14 @@ class Transcriber:
             result = self._report.copy()
             if result["state"] == "reading" and self._finished and self._finished.is_set():
                 result["state"] = "finishing"
+            result["detail"] = self.detail.status()
             return result
 
-    def start(self, region=None):
+    def start(self, region=None, detail="off"):
+        if detail != "off" and not self.detail.status()["available"]:
+            raise BairdError("unavailable", "UnlimitedOCR local no está configurado.")
+        if detail != "off" and self.detail.status()["state"] == "running":
+            raise BairdError("busy", "Hay una segunda lectura en curso.")
         region = parse_region(region, self.library.input_size())
         with self._lock:
             if self._report["state"] in ("starting", "reading"):
@@ -125,7 +132,7 @@ class Transcriber:
             self._finished = None
         try:
             def run(source, video, finished):
-                self._run(source, video, finished, region)
+                self._run(source, video, finished, region, detail)
 
             started = self.library.recorder.start(read_stream=run)
         except Exception:
@@ -144,7 +151,7 @@ class Transcriber:
         self.library.recorder.stop(target=video)
         return self.status()
 
-    def _run(self, source, video, finished, region):
+    def _run(self, source, video, finished, region, detail="off"):
         with self._lock:
             self._finished = finished
             self._report.update(state="reading", video=video.name)
@@ -193,6 +200,7 @@ class Transcriber:
                         label = f"{int(elapsed // 60):02}:{elapsed % 60:04.1f}"
                         text = html.escape("\n".join(added))
                         out.write(f'<section><h2>{label}</h2><pre>{text}</pre>{warning}'
+                                  f'<details><summary>Texto completo de esta vista · OCR de Windows</summary><pre>{html.escape(chr(10).join(lines))}</pre></details>'
                                   f'<details open><summary>Vista del documento</summary>'
                                   f'<img loading="lazy" alt="Pantalla en {label}" src="data:image/jpeg;base64,{image}">'
                                   '</details></section>\n')
@@ -229,3 +237,8 @@ class Transcriber:
             self._report.update(state="partial" if error and document else "done" if document else "failed",
                                 views=views, path=document, name=path.name if document else "",
                                 error=error or ("" if document else "No se pudo leer ninguna vista."))
+            if document and detail != "off":
+                try:
+                    self.detail.start(path, detail)
+                except BairdError as exc:
+                    self._report["detail_error"] = str(exc)

@@ -245,6 +245,20 @@ async function refreshStatus() {
 
   const rec = st.recording || {};
   const tr = st.transcription || {};
+  const detail = tr.detail || {};
+  const detailLine = $('detail-status');
+  detailLine.hidden = !tr.detail_error && (!detail.state || detail.state === 'idle');
+  $('cancel-detail').hidden = detail.state !== 'running';
+  if (!detailLine.hidden) {
+    const messages = {running: 'Segunda lectura en la GPU', failed: 'Falló la segunda lectura', cancelled: 'Segunda lectura cancelada', done: 'Segunda lectura guardada'};
+    detailLine.textContent = [messages[detail.state], detail.source, detail.views ? detail.views + ' vistas' : '', detail.error || tr.detail_error].filter(Boolean).join(' · ');
+    if (detail.name) {
+      const link = document.createElement('a');
+      link.href = '/media/' + encodeURIComponent(detail.name); link.target = '_blank'; link.rel = 'noopener';
+      link.textContent = 'Abrir lectura detallada'; detailLine.append(' · ', link);
+      if (state.lastDetail !== detail.name) { state.lastDetail = detail.name; refreshList(true); }
+    }
+  }
   const reading = tr.state === 'reading';
   const pending = ['reading', 'starting', 'finishing'].includes(tr.state);
   const transcribe = $('btn-transcribe');
@@ -364,6 +378,8 @@ function card(item) {
       <div class="snip" hidden></div>
       <div class="acts">
         ${isDocument ? '<button class="btn small" data-act="open">Abrir</button>' : ''}
+        ${isDocument ? '<button class="btn small" data-act="review">Revisar texto</button>' : ''}
+        ${isDocument && state.status?.transcription?.detail?.available && !item.name.startsWith('Lectura detallada ') ? '<button class="btn small" data-act="reread">Releer con UnlimitedOCR</button>' : ''}
         <button class="btn small" data-act="copy" title="Copiar el archivo (pega con Ctrl+V)">Copiar</button>
         <button class="btn small accent" data-act="faustus" title="Abrir un chat de Faustus con este archivo adjunto">Faustus</button>
         ${item.kind !== 'image' ? '' : '<button class="btn small" data-act="annotate" title="Dibujar flechas, recuadros y texto en una copia">Anotar</button>'}
@@ -413,7 +429,17 @@ async function act(what, item) {
   const enc = encodeURIComponent(item.name);
   try {
     if (what === 'open') { window.open(item.url, '_blank', 'noopener'); }
-    else if (what === 'copy') {
+    else if (what === 'review') { await openDocumentReview(item); }
+    else if (what === 'reread') {
+      const dialog = $('reread-dialog'); dialog.returnValue = 'cancel';
+      const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once:true}));
+      dialog.showModal();
+      const mode = await choice;
+      if (mode === 'document' || mode === 'code') {
+        await callTool('transcribe_reread', {name:item.name, mode});
+        await refreshStatus();
+      }
+    } else if (what === 'copy') {
       await api(`/api/media/${enc}/copy`, { method: 'POST' });
       toast('Copiado. Pégalo en el chat con Ctrl+V.', 'ok');
     } else if (what === 'reveal') {
@@ -542,6 +568,9 @@ function toggleFull() {
 $('btn-shot').addEventListener('click', shot);
 $('btn-clip').addEventListener('click', clip);
 $('btn-rec').addEventListener('click', record);
+$('cancel-detail').addEventListener('click', async () => {
+  try { await callTool('transcribe_cancel_reread'); await refreshStatus(); } catch (err) { fail(err); }
+});
 $('btn-transcribe').addEventListener('click', async () => {
   if (state.transcribeBusy || $('btn-transcribe').disabled) return;
   const reading = state.status?.transcription?.state === 'reading';
@@ -551,6 +580,11 @@ $('btn-transcribe').addEventListener('click', async () => {
     if (reading) await callTool('transcribe_stop');
     else {
       const dialog = $('transcript-options');
+      const detail = state.status?.transcription?.detail;
+      $('ocr-mode-row').hidden = !detail?.available;
+      $('ocr-mode-hint').hidden = !detail?.available;
+      $('ocr-mode').disabled = !detail?.available || detail.state === 'running';
+      if ($('ocr-mode').disabled) $('ocr-mode').value = 'off';
       dialog.returnValue = 'cancel';
       const choice = new Promise(resolve => dialog.addEventListener('close', () => resolve(dialog.returnValue), {once: true}));
       dialog.showModal();
@@ -558,7 +592,7 @@ $('btn-transcribe').addEventListener('click', async () => {
       if (mode !== 'full' && mode !== 'region') return;
       const region = mode === 'region' ? await pickRegion('Marca el documento que quieres transcribir · Esc cancela') : null;
       if (mode === 'region' && !region) return;
-      await callTool('transcribe_start', {region});
+      await callTool('transcribe_start', {region, detail: $('ocr-mode').value});
     }
   } catch (err) { fail(err); }
   finally { state.transcribeBusy = false; await refreshStatus(); }

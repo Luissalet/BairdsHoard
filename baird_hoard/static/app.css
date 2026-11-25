@@ -182,6 +182,15 @@ kbd {
 }
 .toast a { color: var(--hoard-accent); margin-left: 4px; }
 .dialog.wide { width: min(980px, 96vw); }
+.review-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.review-columns #review-zoom { display: block; max-height: 52vh; overflow: auto; }
+#review-zoom { padding: 0; border: 0; background: none; cursor: zoom-in; text-align: left; }
+#review-zoom[aria-pressed="true"] img { width: auto; max-width: none; }
+.review-columns img { width: 100%; height: auto; }
+.review-columns label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.review-columns textarea { min-height: 38vh; width: 100%; box-sizing: border-box; font: 14px/1.5 monospace; }
+#review-notes { white-space: pre-line; }
+@media (max-width: 700px) { .review-columns { grid-template-columns: 1fr; } .review-columns #review-zoom { max-height: 32vh; } }
 .dialog-body { padding: 20px 22px; display: flex; flex-direction: column; gap: 12px; max-height: 92vh; overflow-y: auto; }
 .dialog-body h3 { margin: 6px 0 0; font: 600 16px var(--hoard-font-serif); color: var(--hoard-text); }
 .row-note { margin: 0; font-size: 12.5px; color: var(--hoard-text-dim); }

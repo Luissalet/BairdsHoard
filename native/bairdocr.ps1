@@ -86,9 +86,10 @@ while ($true) {
           }
           if ($words.Count) { [void]$lines.Add(@([int]$x0, [int]$y0, [int]($x1 - $x0), [int]($y1 - $y0), [string]$l.Text, $words.ToArray())) }
         }
-        Say @{ id = $id; ok = $true; w = [int]$bitmap.PixelWidth; h = [int]$bitmap.PixelHeight; lang = $engine.RecognizerLanguage.LanguageTag; lines = $lines.ToArray() }
+        $answer = @{ id = $id; ok = $true; w = [int]$bitmap.PixelWidth; h = [int]$bitmap.PixelHeight; lang = $engine.RecognizerLanguage.LanguageTag; lines = $lines.ToArray() }
       } finally { $bitmap.Dispose() }
     } finally { $stream.Dispose() }
+    Say $answer
   } catch {
     $message = $_.Exception.GetBaseException().Message
     Say @{ id = $id; ok = $false; error = [string]$message }

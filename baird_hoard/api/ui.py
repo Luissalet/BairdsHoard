@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from ..agent_tools import TOOLS_BY_NAME
+from ..document_review import original_view
 from ..errors import BairdError
 from ..hoard_link import family
 from ..native import list_devices
@@ -184,6 +185,11 @@ def media(request: Request, kind: str = "all", limit: int = 200):
     lib = services(request).library
     return {"items": lib.list(kind if kind in ("all", "image", "video", "document") else "all", max(1, min(limit, 1000))),
             "folder": str(lib.folder)}
+
+
+@router.get("/api/media/{name}/review/{number}")
+def review_view(request: Request, name: str, number: int):
+    return original_view(services(request).library.path_of(name), number)
 
 
 @router.get("/api/files/{name}")
