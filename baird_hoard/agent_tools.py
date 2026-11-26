@@ -14,9 +14,11 @@ from .hoard_link.agentkit import call_tool as _call_tool
 from .hoard_link.agentkit import tool_catalog as _catalog
 from .hoard_link.agentkit import uncapped  # noqa: F401 - re-exported for the UI routes
 from .services import Services
+from .source_controls import SourceMode
 
 AGENT_INSTRUCTIONS = """Baird's Hoard shows what another computer puts on the HDMI capture device plugged into this PC (an AVerMedia Live Gamer Portable Lite) and keeps the last minutes in memory.
 screen_look returns the current picture of the other computer as an image (and saves it as a screenshot); use it to see what the user is looking at on that device. capture_status says whether there is a picture (state running), the input resolution and how many seconds are kept; state stuck means the device stopped responding and the user has to unplug and replug its USB cable (say so).
+source_list lists the capture modes and display identities. source_select changes the choice and returns an undo token. A local display stays off until the person starts it from the source bar.
 clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_stop record until stopped. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
 snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds visible text in screenshots, recordings and saved reports and returns timestamped excerpts; media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
@@ -32,6 +34,15 @@ def _d(first: str, detail: str = "", synonyms: str = "") -> str:
     if synonyms:
         parts.append("Sinónimos: " + synonyms)
     return "\n".join(parts)
+
+
+class SourceArgs(BaseModel):
+    mode: SourceMode
+    monitor: str | None = Field(None, max_length=512, description="Stable display ID from source_list.")
+
+
+class SourceUndoArgs(BaseModel):
+    undo_token: str = Field(..., min_length=32, max_length=32)
 
 
 class RegionArg(BaseModel):
@@ -327,6 +338,12 @@ def _watch_check(svc: Services, a: WatchIdArgs) -> dict[str, Any]:
 
 
 TOOLS: list[Tool] = [
+    Tool("source_list", _d("List the selected source, screen activation and available display identities."),
+         Empty, ann(read_only=True), lambda s, a: s.sources.status(list_displays=True)),
+    Tool("source_select", _d("Select capture card, other display or overlay. Only the person can enable a local display."),
+         SourceArgs, ann(), lambda s, a: s.sources.select(a.mode, a.monitor)),
+    Tool("source_undo", _d("Undo the latest source selection. A restored local display is off."),
+         SourceUndoArgs, ann(), lambda s, a: s.sources.undo(a.undo_token)),
     Tool("capture_status", _d("Whether the other computer's picture is coming in, its resolution and what is being recorded.",
                               synonyms="estado, señal, capturadora"),
          Empty, ann(read_only=True), lambda s, a: s.status()),

@@ -101,11 +101,11 @@ class LiveRemux:
         with self._lock:
             return len(self._viewers)
 
-    def _broadcast(self, item: Any) -> None:
+    def _broadcast(self, item: Any, *, generation: int | None = None) -> None:
         with self._lock:
-            viewers = list(self._viewers)
-        for v in viewers:
-            v.push(item)
+            if generation is None or generation == self._generation:
+                for viewer in self._viewers:
+                    viewer.push(item)
 
     # ------------------------------------------------------------------ remuxer
 
@@ -142,6 +142,8 @@ class LiveRemux:
 
     def _stop_proc(self) -> None:
         proc = self._proc
+        self._generation += 1
+        self._init = b""
         self._proc = None
         if proc and proc.poll() is None:
             try:
@@ -242,15 +244,17 @@ class LiveRemux:
                 init_parts.append(box)
                 if name == "moov":
                     with self._lock:
+                        if gen != self._generation:
+                            break
                         self._init = b"".join(init_parts)
                         self._mime = 'video/mp4; codecs="%s"' % self.engine.buffer.codec_string()
-                    self._broadcast({"type": "init", "mime": self._mime})
-                    self._broadcast(self._init)
+                        self._broadcast({"type": "init", "mime": self._mime}, generation=gen)
+                        self._broadcast(self._init, generation=gen)
             elif name == "moof":
                 frag = [box]
             elif name == "mdat":
                 frag.append(box)
-                self._broadcast(b"".join(frag))
+                self._broadcast(b"".join(frag), generation=gen)
                 frag = []
         log.debug("live remuxer output ended (gen %d)", gen)
         with self._lock:

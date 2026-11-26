@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 from typing import Any
 
 from . import __version__
@@ -20,6 +21,8 @@ from .live import LiveRemux
 from .media import Library
 from .ocr import OcrIndex, fold
 from .recording_search import RecordingSearch
+from .screen_privacy import ScreenPolicy
+from .source_controls import ScreenBackend, SourceControls
 from .textmap import TextReader
 from .transcribe import Transcriber
 from .tsbuf import TsBuffer
@@ -31,7 +34,8 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 
 class Services:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, screen_backend: ScreenBackend | None = None,
+                 read_screen_policy: Callable[[], ScreenPolicy] | None = None):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -48,6 +52,8 @@ class Services:
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
+        self.sources = SourceControls(self.engine, lambda: self.library.recorder.status()["state"],
+                                      screen_backend, read_screen_policy)
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
@@ -149,7 +155,8 @@ class Services:
 
     def status(self) -> dict[str, Any]:
         cap = self.engine.snapshot()
-        return {"capture": cap, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
+        return {"capture": cap, "source": self.sources.status(), "recording": self.library.recorder.status(),
+                "viewers": self.live.viewers,
                 "transcription": self.transcriber.status(), "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
                 "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"]),

@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -49,6 +50,12 @@ class _HdmiSource:
         return {}  # Metadata arrives in the helper's ready event.
 
 
+@dataclass(frozen=True)
+class LocalSource:
+    producer: CaptureSource | None = None
+    check: Callable[[bool], str | None] | None = None
+
+
 class CaptureEngine:
     def __init__(self, settings: Settings, buffer: TsBuffer, *, ffmpeg: Optional[str] = None, fake: bool = False,
                  on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = "",
@@ -60,6 +67,8 @@ class CaptureEngine:
         self._source: CaptureSource = source if source is not None else (
             SyntheticSource(ffmpeg, video=fake_source, marked=False) if fake else _HdmiSource()
         )
+        self._local_source: LocalSource | None = None
+        self._proc_hdmi = False
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
@@ -102,7 +111,35 @@ class CaptureEngine:
             self._thread = threading.Thread(target=self._loop, name="baird-capture", daemon=True)
             self._thread.start()
 
+    def source_enabled(self) -> bool:
+        with self._lock:
+            if self._local_source is not None:
+                return self._local_source.producer is not None
+            return self.settings["capture_enabled"]
+
+    def select_local_source(self, producer: CaptureSource | None = None, *,
+                            check: Callable[[bool], str | None] | None = None) -> None:
+        if producer is not None and check is None:
+            raise ValueError("A local capture source requires a screen privacy check.")
+        self._select_source(LocalSource(producer, check))
+
+    def restore_default_source(self) -> None:
+        self._select_source(None)
+
+    def _select_source(self, local: LocalSource | None) -> None:
+        with self._lock:
+            if local == self._local_source:
+                return
+            self._local_source = local
+            self._retry_at = self._limit_until = 0.0
+            self._retry_step = self._fails = 0
+            self.buffer.reset()
+            self.state.update(state="idle", message="", device="", input=None, kbps=0, since=None, audio=False)
+            self.settings_changed(reopen=True)
+
     def _wanted(self) -> bool:
+        if self._local_source is not None:
+            return self._local_source.producer is not None and bool(self._demands)
         return self.settings["capture_enabled"] and bool(self._demands or self.settings["capture_always_on"])
 
     def set_demand(self, source: object, active: bool) -> None:
@@ -162,8 +199,10 @@ class CaptureEngine:
         with self._lock:
             out = dict(self.state)
             out["retry_in_s"] = round(max(0.0, max(self._retry_at, self._limit_until) - time.monotonic()), 1)
-            if not self.settings["capture_enabled"]:
+            if not self.source_enabled():
                 out.update(state="off", message="Capture is off.")
+            elif self._restart.is_set() and out["state"] == "running":
+                out.update(state="starting", input=None, kbps=0, since=None)
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
@@ -209,7 +248,7 @@ class CaptureEngine:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return
-        if not self._uses_hdmi_helper:
+        if not self._proc_hdmi:
             proc.terminate()
             return
         try:
@@ -269,11 +308,12 @@ class CaptureEngine:
             try:
                 if self._stuck_source is not None and self._stuck_source.poll() is not None:
                     self._stuck_source = None
-                if self._stuck_pids and self._uses_hdmi_helper:
+                hdmi = self._local_source is None and self._uses_hdmi_helper
+                if self._stuck_pids and hdmi:
                     self._stuck_pids &= helper_pids()
                 if self._stuck_source is not None:
                     self._set(state="error", message=SOURCE_STUCK_MESSAGE, kbps=0, since=None)
-                elif self._stuck_pids:
+                elif self._stuck_pids and hdmi:
                     self._go_stuck("previous helper is still running")
                 else:
                     attempted = self._run_once()
@@ -294,13 +334,21 @@ class CaptureEngine:
         with self._lock:
             if not self._wanted() or self._stop.is_set():
                 return False
-        cmd = self._command()
-        source_state = self._source.initial_state()
+            local = self._local_source
+        source = local.producer if local is not None else self._source
+        if source is None:
+            return False
+        if local is not None and local.check and local.check(True):
+            self._block_local_source(local)
+            return False
+        cmd = self._command() if local is None else source.command(self.settings)
+        source_state = source.initial_state()
+        alternate = local is not None or self._alternate_source
         with self._lock:
-            if not self._wanted() or self._stop.is_set() or self._restart.is_set():
+            if not self._wanted() or self._stop.is_set() or self._restart.is_set() or local is not self._local_source:
                 return False
             manual, self._manual_open = self._manual_open, False
-            limit = 0.0 if self._alternate_source else self._reserve_opening(manual=manual)
+            limit = 0.0 if alternate else self._reserve_opening(manual=manual)
             if limit:
                 self._limit_until = time.monotonic() + limit
             else:
@@ -309,10 +357,11 @@ class CaptureEngine:
                 proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0, creationflags=NO_WINDOW)
                 self._proc = proc
+                self._proc_hdmi = local is None and self._uses_hdmi_helper
         if limit:
             self._set(state="rate_limited", message="Hourly capture opening limit reached.", hint="", kbps=0, since=None)
             return True
-        message = "Opening the capture source…" if self._alternate_source else "Opening the capture device…"
+        message = "Opening the capture source…" if alternate else "Opening the capture device…"
         self._set(state="starting", message=message, hint="", input=None, kbps=0, since=None)
         bind_to_app(proc)
         err_thread = threading.Thread(target=self._read_events, args=(proc,), name="baird-capture-events", daemon=True)
@@ -320,26 +369,26 @@ class CaptureEngine:
         if source_state:
             self._set(**source_state)
         box = {"got_data": False}
-        pump = threading.Thread(target=self._pump, args=(proc, box), name="baird-capture-pump", daemon=True)
+        pump = threading.Thread(target=self._pump, args=(proc, box, local), name="baird-capture-pump", daemon=True)
         pump.start()
 
         started = time.time()
         killed_at: Optional[float] = None
         why = ""
         closing = False
-        while pump.is_alive():
+        while True:
             pump.join(0.25)
-            if not pump.is_alive():
-                break
             now = time.time()
             if killed_at is None:
                 with self._lock:
-                    closing = (self._stop.is_set() or self._restart.is_set() or not self.settings["capture_enabled"]
-                               or (not self._wanted() and time.monotonic() >= self._idle_until))
+                    closing = (self._stop.is_set() or self._restart.is_set() or not self.source_enabled()
+                               or (not self._wanted() and (local is not None or time.monotonic() >= self._idle_until)))
                 if closing:
                     self._kill()
                     killed_at = now
-                    continue
+            if not pump.is_alive():
+                break
+            if killed_at is None:
                 fatal = self._fatal
                 if fatal and now - fatal[2] > EXIT_GRACE_S:
                     why = f"did not leave after '{fatal[0]}'"
@@ -359,7 +408,7 @@ class CaptureEngine:
             code = None
         if code is None:
             self._proc = None
-            if self._alternate_source:
+            if alternate:
                 self._stuck_source = proc
                 if not self._stop.is_set():
                     self._set(state="error", message=SOURCE_STUCK_MESSAGE, input=None, kbps=0, since=None)
@@ -379,7 +428,7 @@ class CaptureEngine:
         got_data = box["got_data"]
         with self._lock:
             self.state["restarts"] = int(self.state.get("restarts", 0)) + 1
-        if self._alternate_source:
+        if alternate:
             self._set(state="error", message=f"The capture source stopped (code {code}).", kbps=0, since=None)
             return True
         log.info("capture helper exited with %s", code)
@@ -401,7 +450,16 @@ class CaptureEngine:
                 self._set(state="error", message=f"The capture helper stopped (code {code}).", kbps=0, since=None)
         return True
 
-    def _pump(self, proc: subprocess.Popen, box: dict[str, bool]) -> None:
+    def _block_local_source(self, local: LocalSource) -> None:
+        with self._lock:
+            if self._local_source is not local:
+                return
+            self._local_source = LocalSource()
+            self._restart.set()
+            self.buffer.reset()
+        self._set(state="off", message="Screen capture is off.", device="", input=None, kbps=0, since=None, audio=False)
+
+    def _pump(self, proc: subprocess.Popen, box: dict[str, bool], local: LocalSource | None = None) -> None:
         """Read the source's stdout until it closes, feeding the buffer and the listeners."""
         out = proc.stdout
         if out is None:
@@ -410,9 +468,15 @@ class CaptureEngine:
         try:
             while True:
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
-                if not chunk or self._proc is not proc:
+                if not chunk:
                     break
-                aligned, starts = self.buffer.feed(chunk)
+                if local and local.check and local.check(False):
+                    self._block_local_source(local)
+                    break
+                with self._lock:
+                    if self._proc is not proc or local is not self._local_source:
+                        break
+                    aligned, starts = self.buffer.feed(chunk)
                 if not aligned:
                     continue
                 end_total = self.buffer.bytes_total
@@ -468,7 +532,7 @@ class CaptureEngine:
     def send(self, command: str) -> bool:
         """Send a line to the helper (``iframe``); False when it is not running."""
         proc = self._proc
-        if proc is None or proc.poll() is not None or proc.stdin is None or not self._uses_hdmi_helper:
+        if proc is None or proc.poll() is not None or proc.stdin is None or not self._proc_hdmi:
             return False
         try:
             proc.stdin.write((command.strip() + "\n").encode())
