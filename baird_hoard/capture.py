@@ -23,6 +23,10 @@ log = logging.getLogger("baird.capture")
 Listener = Callable[[bytes, list[int], int], None]  # aligned bytes, segment starts in them, stream offset after them
 
 STUCK_MESSAGE = "The capture device stopped responding."
+NO_SIGNAL_MESSAGE = "No picture is arriving from the capture device."
+# The device delivers nothing in both cases; from this side they look the same.
+NO_SIGNAL_HINT = ("The other computer is off or asleep, or its HDMI output is content-protected (HDCP): "
+                  "a monitor on the pass-through still shows it, the device may not capture it.")
 START_LIMIT_S = 30.0     # a helper that has produced nothing after this long is killed
 SILENCE_LIMIT_S = 20.0   # the helper's own watchdog fires at 8 s; this is the backstop
 EXIT_GRACE_S = 4.0       # time a helper gets to leave after reporting an error
@@ -50,6 +54,7 @@ class CaptureEngine:
         self._demands: set[object] = set()
         self._idle_until = 0.0
         self._retry_at = 0.0
+        self._manual_open = False
         self._retry_step = 0
         self._limit_until = 0.0
         self._opening = False
@@ -94,6 +99,8 @@ class CaptureEngine:
                 self._demands.discard(source)
             if self._wanted():
                 self._start()
+            else:
+                self._manual_open = False
             self._wake.set()
 
     @contextmanager
@@ -119,12 +126,18 @@ class CaptureEngine:
                 self._restart.set()
             if self._wanted():
                 self._start()
+            else:
+                self._manual_open = False
             self._wake.set()
             self._changed.notify_all()
 
-    def retry_now(self) -> dict[str, Any]:
+    def retry_now(self, *, manual: bool = False) -> dict[str, Any]:
         with self._lock:
-            if self._wanted() and not self._opening and self._proc is None and time.monotonic() >= self._limit_until:
+            if (self._wanted() and not self._opening and self._proc is None
+                    and (manual or time.monotonic() >= self._limit_until)):
+                if manual:
+                    self._manual_open = True
+                    self._limit_until = 0.0
                 self._retry_at = 0.0
                 self._wake.set()
         return self.snapshot()
@@ -158,8 +171,9 @@ class CaptureEngine:
         st = self.snapshot()
         if st["state"] != "running" or st["age_s"] is None or st["age_s"] > 3:
             hint = {"off": "Turn capture on.", "no_device": "Plug in the capture device (AVerMedia GL310).",
-                    "stuck": STUCK_HINT, "rate_limited": "Wait for the hourly opening limit to reset.",
-                    "no_signal": "Check that the other computer is on and sends a picture to the HDMI cable."}.get(st["state"], "")
+                    "stuck": STUCK_HINT,
+                    "rate_limited": "Automatic retries are paused for this hour; the viewer's button opens once more.",
+                    "no_signal": NO_SIGNAL_HINT}.get(st["state"], "")
             raise BairdError("no_signal", "There is no live picture right now.", hint, state=st["state"])
 
     # ------------------------------------------------------------------ internals
@@ -216,7 +230,7 @@ class CaptureEngine:
             log.error("capture device stuck: %s", why)
         self._set(state="stuck", message=STUCK_MESSAGE, hint=STUCK_HINT, input=None, kbps=0, since=None)
 
-    def _reserve_opening(self) -> float:
+    def _reserve_opening(self, *, manual: bool = False) -> float:
         """Count each attempt before spawning, including across restarts sharing this data directory."""
         db = sqlite3.connect(self._budget_path)
         try:
@@ -226,7 +240,7 @@ class CaptureEngine:
                 now = time.time()
                 db.execute("DELETE FROM openings WHERE started <= ?", (now - OPEN_WINDOW_S,))
                 count, first = db.execute("SELECT COUNT(*), MIN(started) FROM openings").fetchone()
-                if count >= OPEN_LIMIT:
+                if count >= OPEN_LIMIT and not manual:
                     return first + OPEN_WINDOW_S - now
                 db.execute("INSERT INTO openings VALUES (?)", (now,))
                 return 0.0
@@ -262,6 +276,7 @@ class CaptureEngine:
                 self._set(state="error", message=str(exc)[:300], kbps=0, since=None)
                 log.exception("capture loop")
             with self._changed:
+                self._manual_open = False
                 if attempted and not self._restart.is_set() and self.state["state"] in ("no_signal", "no_device", "stuck", "error"):
                     self._retry_at = time.monotonic() + RETRY_DELAYS_S[self._retry_step]
                     self._retry_step = min(self._retry_step + 1, len(RETRY_DELAYS_S) - 1)
@@ -278,7 +293,8 @@ class CaptureEngine:
         with self._lock:
             if not self._wanted() or self._stop.is_set() or self._restart.is_set():
                 return False
-            limit = self._reserve_opening()
+            manual, self._manual_open = self._manual_open, False
+            limit = self._reserve_opening(manual=manual)
             if limit:
                 self._limit_until = time.monotonic() + limit
             else:
@@ -357,8 +373,7 @@ class CaptureEngine:
             self._fails = 0
         if code in (0, 4, 5) or (fatal and fatal[0] == "no_data") or (why and got_data and not fatal):
             self._fails = 0
-            self._set(state="no_signal", message="No picture: the other computer is off, asleep or not sending to HDMI.",
-                      hint="", kbps=0, since=None)
+            self._set(state="no_signal", message=NO_SIGNAL_MESSAGE, hint=NO_SIGNAL_HINT, kbps=0, since=None)
         elif code == 2:
             self._fails = 0
             self._set(state="no_device", message="The capture device disappeared.", hint="", kbps=0, since=None)

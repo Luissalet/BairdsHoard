@@ -205,8 +205,10 @@ const STATE_TEXT = {
 const STATE_HINT = {
   starting: ['Abriendo la capturadora…', ''],
   idle: ['Captura en espera', ''],
-  rate_limited: ['Límite de aperturas alcanzado', 'Baird esperará antes de volver a abrir la capturadora.'],
-  no_signal: ['Sin señal', 'El otro ordenador está apagado, en reposo o no manda imagen por HDMI.'],
+  rate_limited: ['Reintentos automáticos en pausa',
+    'Ya van 12 aperturas en la última hora. «Apertura extra» abre la capturadora una vez más.'],
+  no_signal: ['No llega imagen',
+    'El otro ordenador está apagado o en reposo, o su salida HDMI va protegida (HDCP): el monitor la muestra, la capturadora no puede grabarla.'],
   no_device: ['Capturadora no conectada', 'Conecta la AVerMedia Live Gamer Portable Lite por USB.'],
   off: ['Captura apagada', 'Actívala en Ajustes.'],
   error: ['No se pudo abrir la capturadora', ''],
@@ -227,7 +229,8 @@ async function refreshStatus() {
     ? `${(cap.kbps / 1000).toFixed(1)} Mb/s · ${Math.round(cap.buffered_seconds || 0)} s en memoria`
     : '';
   const msg = STATE_HINT[s];
-  $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error'].includes(s);
+  $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error', 'rate_limited'].includes(s);
+  $('btn-retry').textContent = s === 'rate_limited' ? 'Apertura extra' : 'Reintentar ahora';
   $('stage-msg').hidden = s === 'running' || !msg;
   if (msg) {
     if ($('stage-msg-title').textContent !== msg[0]) $('stage-msg-title').textContent = msg[0];
@@ -321,7 +324,7 @@ async function refreshStatus() {
 }
 
 $('btn-retry').addEventListener('click', async () => {
-  try { await api('/api/capture/retry', { method: 'POST' }); await refreshStatus(); }
+  try { await api('/api/capture/retry?manual=true', { method: 'POST' }); await refreshStatus(); }
   catch (err) { fail(err); }
 });
 

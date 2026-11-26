@@ -80,7 +80,9 @@ def status(request: Request):
 
 
 @router.post("/api/capture/retry")
-def capture_retry(request: Request):
+def capture_retry(request: Request, manual: bool = False):
+    if manual:
+        return services(request).engine.retry_now(manual=True)
     return tool(request, "capture_retry")
 
 

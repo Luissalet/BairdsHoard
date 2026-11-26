@@ -85,6 +85,26 @@ What Baird does about it:
   (Windows allows renaming a running program) instead of failing.
 
 
+## Content-protected sources
+
+A computer that protects its HDMI output (HDCP) shows normally on a monitor connected to the pass-through and
+delivers nothing to the encoder: `bairdcap` receives no packets and exits with `no_data`, as it does with a
+computer that is asleep. The `no_signal` state names both cases because the device reports them the same way.
+
+Measured on 26 November 2026 with a laptop that showed on the pass-through monitor and not in Baird:
+
+- A cold opening produced no packets on either crossbar video input, with either audio route. Key-frame
+  requests changed nothing.
+- Reselecting the HDMI input (`Video_RGB`, then `Video_SerialDigital` again) restarts the HDMI link. The monitor
+  on the pass-through goes black for a moment, the encoder delivers about three seconds of 1080p video with
+  audio (some 90 frames each time) and then stops again.
+- That matches a source that sends the picture in the clear while the handshake runs and encrypts it afterwards.
+  The driver exposes no HDCP status to confirm it.
+
+The helper therefore never switches inputs to recover a silent device: it blanks the pass-through monitor and
+yields three seconds. The remedy is on the source, in its graphics settings where the driver allows turning
+HDCP off for that output.
+
 ## Incident on 12 November 2026 and opening policy
 
 The Windows crash at 16:56 reported bugcheck `0x7E` with exception `0xC0000046`. The dump's system-thread stack
@@ -99,8 +119,9 @@ repeated opens of this driver. The crash and recovery were not reproduced agains
 - A failed opening or signal loss schedules retries after 15 seconds, 1 minute, 5 minutes and then every 15 minutes,
   only while capture is requested. Usable video resets the sequence. **Reintentar ahora** can advance the retry
   while demand exists and the previous helper has exited.
-- At most 12 opening attempts are admitted in any rolling hour, including manual retries, setting changes and
-  process restarts with the same Baird data directory. The UI and `capture_status` report the limit and time left.
+- Automatic retries pause after 12 openings in a rolling hour, including across process restarts. The viewer's
+  **Apertura extra** button can request one opening during that pause. It is counted like any other opening,
+  and does not reset the history or authorize further automatic attempts.
   The budget is stored in `capture-opens.sqlite3` and an attempt is counted before the helper is launched.
 - **Captura siempre activa** is off by default, including for existing settings. It supplies persistent demand and
   still follows the retry policy. **Captura activada** is the master switch. The Hub skips Baird at startup and

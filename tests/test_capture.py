@@ -97,6 +97,7 @@ def test_no_signal_backs_off_and_only_retries_with_demand(engine, monkeypatch):
     with engine.request():
         wait_for(lambda: engine.snapshot()["restarts"] == 1 and engine.snapshot()["retry_in_s"] > 0)
         assert engine.snapshot()["state"] == "no_signal"
+        assert "HDCP" in engine.snapshot()["hint"] and "asleep" in engine.snapshot()["hint"]
         first_wait = engine.snapshot()["retry_in_s"]
         wait_for(lambda: engine.snapshot()["restarts"] == 2 and engine.snapshot()["retry_in_s"] > 0.5)
         assert engine.snapshot()["retry_in_s"] > first_wait
@@ -107,7 +108,7 @@ def test_no_signal_backs_off_and_only_retries_with_demand(engine, monkeypatch):
     assert engine.snapshot()["restarts"] == 3
 
 
-def test_hourly_limit_covers_manual_retries_and_survives_restart(engine, monkeypatch):
+def test_hourly_limit_covers_ordinary_retries_and_survives_restart(engine, monkeypatch):
     assert capture.OPEN_LIMIT == 12 and capture.OPEN_WINDOW_S == 3600
     monkeypatch.setattr(capture, "OPEN_LIMIT", 2)
     use_script(monkeypatch, engine, NO_SIGNAL)
@@ -136,6 +137,21 @@ def test_hourly_limit_covers_manual_retries_and_survives_restart(engine, monkeyp
             assert fresh.snapshot()["restarts"] == 0
     finally:
         fresh.stop()
+
+
+def test_viewer_can_open_once_while_automatic_retries_are_limited(engine, monkeypatch):
+    monkeypatch.setattr(capture, "OPEN_LIMIT", 1)
+    monkeypatch.setattr(capture, "RETRY_DELAYS_S", (0.1,))
+    use_script(monkeypatch, engine, NO_SIGNAL)
+    with engine.request():
+        wait_for(lambda: engine.snapshot()["state"] == "rate_limited" and not engine._opening)
+        assert engine.snapshot()["restarts"] == 1
+        engine.retry_now(manual=True)
+        wait_for(lambda: engine.snapshot()["restarts"] == 2)
+        wait_for(lambda: engine.snapshot()["state"] == "rate_limited")
+        assert engine.snapshot()["retry_in_s"] > 3500
+        engine.retry_now()
+        assert engine.snapshot()["retry_in_s"] > 3500
 
 
 def test_only_last_consumer_releases_the_helper_after_grace(engine, monkeypatch):

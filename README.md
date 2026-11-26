@@ -64,8 +64,9 @@ the C# compiler that ships with Windows (.NET Framework 4.8).
 Files go to `Videos\Baird` by default (Settings → Folder). Settings, thumbnails and logs live in `data/`.
 
 Capture opens on demand. A visible live view, a recording, an enabled watch rule or a picture tool can open the
-device. It closes after 10 seconds without demand. The live view offers **Reintentar ahora** after signal loss and
-shows the hourly opening limit when it is reached. The Hub skips Baird when it starts a profile at startup or
+device. It closes after 10 seconds without demand. The live view offers **Reintentar ahora** after signal loss.
+When the hourly opening limit pauses automatic retries, **Apertura extra** opens the device once more. A computer
+whose HDMI output is content-protected (HDCP) shows on a monitor connected to the pass-through but cannot be captured. The Hub skips Baird when it starts a profile at startup or
 runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 ## Settings
@@ -101,7 +102,7 @@ This app carries procedures from the skill library of the family's workspace for
 |---|---|
 | `GET /api/health` | service, capture state, input resolution |
 | `GET /api/status` | capture, recording, jobs, viewers and retry timing |
-| `POST /api/capture/retry` | advance a pending retry while there is demand, within the hourly limit |
+| `POST /api/capture/retry` | advance a pending retry while there is demand, within the hourly limit; `?manual=true` (the viewer's button) opens once past it |
 | `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | the three buttons |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | library, files, thumbnails |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | file actions |

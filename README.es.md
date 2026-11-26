@@ -55,7 +55,7 @@ Necesita ffmpeg en el PATH (o `BAIRD_FFMPEG`). El ayudante nativo `native/bairdc
 
 Los archivos van a `Vídeos\Baird` por defecto (Ajustes → Carpeta). Los ajustes, miniaturas y registros están en `data/`.
 
-La captura se abre bajo demanda: un directo visible, una grabación, una regla de vigilancia activa o una herramienta de imagen pueden abrir la capturadora, y se libera tras 10 segundos sin demanda. Tras perder la señal, el directo ofrece **Reintentar ahora** y muestra el límite horario de aperturas cuando se alcanza. El Hub omite Baird al arrancar un perfil o al ejecutar **Arrancar todo**. Más en las [notas del dispositivo](docs/DEVICE.md).
+La captura se abre bajo demanda: un directo visible, una grabación, una regla de vigilancia activa o una herramienta de imagen pueden abrir la capturadora, y se libera tras 10 segundos sin demanda. Tras perder la señal, el directo ofrece **Reintentar ahora**; cuando el límite horario pausa los reintentos automáticos, **Apertura extra** abre la capturadora una vez más. Un ordenador cuya salida HDMI va protegida (HDCP) se ve en el monitor conectado a la salida de la capturadora, pero no se puede capturar. El Hub omite Baird al arrancar un perfil o al ejecutar **Arrancar todo**. Más en las [notas del dispositivo](docs/DEVICE.md).
 
 ## Ajustes
 
@@ -87,7 +87,7 @@ La app lleva además procedimientos de la biblioteca de skills de la familia par
 |---|---|
 | `GET /api/health` | servicio, estado de la captura, resolución de entrada |
 | `GET /api/status` | captura, grabación, trabajos, visores y tiempos de reintento |
-| `POST /api/capture/retry` | adelanta un reintento pendiente mientras haya demanda, dentro del límite horario |
+| `POST /api/capture/retry` | adelanta un reintento pendiente mientras haya demanda, dentro del límite horario; `?manual=true` (el botón del directo) abre una vez por encima de él |
 | `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | los tres botones |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | biblioteca, archivos, miniaturas |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | acciones sobre archivos |

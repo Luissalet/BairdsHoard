@@ -63,7 +63,8 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   `no_device`, `no_signal`, `rate_limited`, back to `running` when the picture returns).
 - Open capture on demand (live viewer, recording, enabled watch rule or picture tool), then release it after ten
   idle seconds. Consecutive failures back off at 15 s, 1 min, 5 min and 15 min maximum. The `capture_retry` tool
-  advances the next attempt with demand and shares the 12-per-hour limit. The Hub skips automatic startup.
+  advances the next attempt with demand and shares the 12-per-hour limit; the viewer's **Apertura extra** button
+  opens once past it. The Hub skips automatic startup.
 - Notice when the device's driver stops responding (state `stuck`, with the hint to unplug and replug the USB cable),
   wait for a stuck helper to exit, then retry if capture is still requested.
   The helper never outlives the app.
