@@ -4,6 +4,8 @@ Baird's source feeds H.264 video and AAC audio in an MPEG-2 transport stream to 
 
 The default is the HDMI helper. Its hourly opening budget, watchdog, retry policy and helper commands apply as before. `BAIRD_FAKE` still enables the original demo and accepts `BAIRD_FAKE_SOURCE` for a looping file. With `BAIRD_SYNTHETIC_CAPTURE=1`, Baird uses a separate test source on demand. It produces a 1280×720 picture at 30 fps, a key frame every 30 frames, and a 440 Hz stereo tone at 48 kHz. The expected coordinates in source pixels are (208, 168) at the centre of the red patch and (1070, 554) at the centre of the green patch.
 
+See [Capture source bar](SOURCE_CONTROLS.md) for source selection, the activation and privacy checks, and the backend contract.
+
 ## Castellano
 
 La fuente entrega vídeo H.264 y audio AAC en MPEG-2 TS al motor. El contrato `CaptureSource` pide al proceso que escriba los paquetes binarios por stdout, repita PAT y PMT e incluya un fotograma clave por segundo. Puede publicar metadatos en líneas JSON por stderr. El motor abre y cierra el proceso según la demanda y alimenta el mismo búfer del que se sirven el visor, el copiloto y la biblioteca.

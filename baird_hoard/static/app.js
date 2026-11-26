@@ -22,6 +22,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.hint = data.hint || '';
+    err.code = data.code || '';
     throw err;
   }
   return data;
@@ -65,6 +66,7 @@ class LivePlayer {
     this.el = el; this.ws = null; this.ms = null; this.sb = null; this.queue = []; this.mime = '';
     this.retry = 1000; this.retryTimer = null;
     this.pageActive = true;
+    this.sourceAvailable = true;
     setInterval(() => this.chase(), 400);
     document.addEventListener('visibilitychange', () => this.sync());
     el.addEventListener('enterpictureinpicture', () => this.sync());
@@ -74,7 +76,7 @@ class LivePlayer {
   }
 
   sync() {
-    if (this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
+    if (this.sourceAvailable && this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
       this.connect();
       this.chase(true);
     } else {
@@ -85,6 +87,12 @@ class LivePlayer {
       if (ws) ws.close();
       this.teardown();
     }
+  }
+
+  setSourceAvailable(available) {
+    if (this.sourceAvailable === available) return;
+    this.sourceAvailable = available;
+    this.sync();
   }
 
   connect() {
@@ -154,6 +162,8 @@ class LivePlayer {
     if (this.ms) {
       try { if (this.ms.readyState === 'open') this.ms.endOfStream(); } catch { /* ignore */ }
       URL.revokeObjectURL(this.el.src);
+      this.el.removeAttribute('src');
+      this.el.load();
       this.ms = null;
     }
   }
@@ -220,6 +230,8 @@ async function refreshStatus() {
   let st;
   try { st = await api('/api/status'); } catch { setChip('error', 'Hoard sin respuesta'); return; }
   state.status = st;
+  const sourceMessage = sourceControls.update(st);
+  player.setSourceAvailable(!st.source || st.source.mode === 'hdmi' || st.source.active);
   const cap = st.capture || {};
   const s = cap.state || 'off';
   let text = STATE_TEXT[s] || s;
@@ -228,8 +240,8 @@ async function refreshStatus() {
   $('meta').textContent = s === 'running'
     ? `${(cap.kbps / 1000).toFixed(1)} Mb/s · ${Math.round(cap.buffered_seconds || 0)} s en memoria`
     : '';
-  const msg = STATE_HINT[s];
-  $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error', 'rate_limited'].includes(s);
+  const msg = sourceMessage || STATE_HINT[s];
+  $('btn-retry').hidden = !st.source?.active && !!sourceMessage || !['no_signal', 'no_device', 'stuck', 'error', 'rate_limited'].includes(s);
   $('btn-retry').textContent = s === 'rate_limited' ? 'Apertura extra' : 'Reintentar ahora';
   $('stage-msg').hidden = s === 'running' || !msg;
   if (msg) {
