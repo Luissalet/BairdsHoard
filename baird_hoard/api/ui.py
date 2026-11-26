@@ -177,6 +177,16 @@ def record_start(request: Request):
     return services(request).library.recorder.start()
 
 
+@router.post("/api/record/pause")
+def record_pause(request: Request):
+    return services(request).library.recorder.pause()
+
+
+@router.post("/api/record/resume")
+def record_resume(request: Request):
+    return services(request).library.recorder.resume()
+
+
 @router.post("/api/record/stop")
 def record_stop(request: Request):
     return services(request).library.recorder.stop()
@@ -258,9 +268,17 @@ def devices(request: Request):
     config = services(request).config
     if config.synthetic_capture:
         return {"devices": ["synthetic"]}
+    if config.monitor_capture:
+        return {"devices": []}
     if config.fake:
         return {"devices": ["demo"]}
     return {"devices": list_devices()}
+
+
+@router.get("/api/monitors")
+def monitors(request: Request):
+    source = services(request).monitor_source
+    return {"enabled": source is not None, "monitors": source.list_monitors() if source else []}
 
 
 @router.get("/api/ui/tools")

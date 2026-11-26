@@ -222,13 +222,20 @@ async function refreshStatus() {
   state.status = st;
   const cap = st.capture || {};
   const s = cap.state || 'off';
-  let text = STATE_TEXT[s] || s;
+  const monitor = cap.source === 'monitor';
+  let text = s === 'reselect' ? captureText('Elige monitor', 'Choose a monitor') : STATE_TEXT[s] || s;
   if (s === 'running' && cap.input) text += ` · ${cap.input.width}×${cap.input.height}`;
   setChip(s, text);
   $('meta').textContent = s === 'running'
     ? `${(cap.kbps / 1000).toFixed(1)} Mb/s · ${Math.round(cap.buffered_seconds || 0)} s en memoria`
     : '';
-  const msg = STATE_HINT[s];
+  const monitorHints = {
+    starting: [captureText('Abriendo el monitor…', 'Opening the monitor…'), ''],
+    reselect: [captureText('Elige un monitor', 'Choose a monitor'),
+      captureText('Vuelve a elegir la pantalla para abrir la imagen.', 'Select the display again to open the picture.')],
+    error: [captureText('No se pudo abrir el monitor', 'Could not open the monitor'), ''],
+  };
+  const msg = monitor && monitorHints[s] || STATE_HINT[s];
   $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error', 'rate_limited'].includes(s);
   $('btn-retry').textContent = s === 'rate_limited' ? 'Apertura extra' : 'Reintentar ahora';
   $('stage-msg').hidden = s === 'running' || !msg;
@@ -241,6 +248,7 @@ async function refreshStatus() {
   }
   const live = s === 'running';
   $('btn-shot').disabled = !live;
+  showMonitorLevels(cap);
   $('btn-zone').disabled = !live;
   $('btn-clip').disabled = !live;
   $('clip-label').textContent = `Últimos ${st.clip_seconds} s`;
@@ -291,18 +299,25 @@ async function refreshStatus() {
     }
   }
   const recording = rec.state === 'recording';
-  $('btn-rec').disabled = pending || !live && !recording || rec.state === 'finishing';
+  const paused = rec.state === 'paused';
+  const activeRecording = recording || paused;
+  $('btn-rec').disabled = pending || (!live && !activeRecording) || rec.state === 'finishing';
   $('btn-rec').classList.toggle('recording', recording);
-  $('rec-label').textContent = recording ? 'Parar' : rec.state === 'finishing' ? 'Guardando…' : 'Grabar';
-  $('rec-badge').hidden = !recording;
+  $('rec-label').textContent = activeRecording ? 'Parar' : rec.state === 'finishing' ? 'Guardando…' : 'Grabar';
+  const pause = $('btn-rec-pause');
+  pause.hidden = !activeRecording || !rec.can_pause || pending;
+  pause.disabled = !!state.pauseBusy;
+  pause.textContent = paused ? captureText('Reanudar', 'Resume') : captureText('Pausar', 'Pause');
+  $('rec-badge').hidden = !activeRecording;
   const timer = $('rec-timer');
-  timer.hidden = !recording;
-  if (recording) {
+  timer.hidden = !activeRecording;
+  if (activeRecording) {
     const seconds = Math.max(0, Math.floor(rec.seconds));
     const hours = Math.floor(seconds / 3600);
     const minutesAndSeconds = fmtDur(seconds % 3600).padStart(5, '0');
     timer.textContent = hours ? `${hours}:${minutesAndSeconds}` : minutesAndSeconds;
-    $('rec-time').textContent = `${timer.textContent} · ${fmtSize(rec.bytes || 0)}`;
+    const prefix = paused ? captureText('En pausa · ', 'Paused · ') : '';
+    $('rec-time').textContent = `${prefix}${timer.textContent} · ${fmtSize(rec.bytes || 0)}`;
   }
   if (state.recWas === 'finishing' && rec.state === 'idle' && rec.last) {
     if (rec.last.error) toast(`La grabación no se pudo convertir: ${rec.last.error}`, 'err');
@@ -559,12 +574,31 @@ async function clip() {
 
 async function record() {
   if ($('btn-rec').disabled) return;
-  const recording = state.status && state.status.recording && state.status.recording.state === 'recording';
+  const recording = ['recording', 'paused'].includes(state.status?.recording?.state);
   try {
     await api(recording ? '/api/record/stop' : '/api/record/start', { method: 'POST' });
     if (!recording) toast('Grabando. Pulsa R o Parar para terminar.');
     refreshStatus();
   } catch (err) { fail(err); }
+}
+
+async function toggleRecordingPause() {
+  if ($('btn-rec-pause').hidden || state.pauseBusy) return;
+  state.pauseBusy = true;
+  $('btn-rec-pause').disabled = true;
+  const command = state.status?.recording?.state === 'paused' ? 'resume' : 'pause';
+  try {
+    await api(`/api/record/${command}`, { method: 'POST' });
+  } catch (err) {
+    fail(err);
+  } finally {
+    state.pauseBusy = false;
+    await refreshStatus();
+  }
+}
+
+function captureText(es, en) {
+  return document.documentElement.lang.startsWith('en') ? en : es;
 }
 
 // Audio meter. The element plays unmuted into a Web Audio graph (source -> analyser -> gain -> speakers) so the
@@ -597,7 +631,7 @@ function resumeMeter() {
 function drawMeter(now) {
   requestAnimationFrame(drawMeter);
   const { an, buf } = meter;
-  if (!an) return;
+  if (!an || state.status?.capture?.source === 'monitor') return;
   an.getFloatTimeDomainData(buf);
   // Remove the DC offset first: an unconnected analog input gives a flat non-zero line that is not sound.
   let mean = 0;
@@ -618,6 +652,26 @@ function drawMeter(now) {
   $('vu-label').textContent = suspended ? 'pulsa aquí' : silent ? 'sin audio' : `${Math.round(db)} dB`;
 }
 
+function showMonitorLevels(capture) {
+  const nativeMeter = capture.source === 'monitor';
+  $('vu-mic').hidden = !nativeMeter || capture.microphone_level == null;
+  if (!nativeMeter) return;
+  const draw = (value, fill, label, name) => {
+    const level = capture.state === 'running' ? Number(value) || 0 : 0;
+    const db = level > 0 ? Math.round(20 * Math.log10(level)) : -120;
+    const percentage = Math.max(0, Math.min(100, (db + 60) * 100 / 60));
+    $(fill).style.width = `${percentage}%`;
+    $(label).textContent = `${name} · ${db > -60 ? db + ' dBFS' : captureText('sin audio', 'silent')}`;
+    return percentage;
+  };
+  const peak = draw(capture.audio_level, 'vu-fill', 'vu-label', captureText('Sistema', 'System'));
+  $('vu-peak').style.left = `${peak}%`;
+  $('vu').classList.toggle('silent', peak === 0);
+  if (!$('vu-mic').hidden) {
+    draw(capture.microphone_level, 'vu-mic-fill', 'vu-mic-label', captureText('Micrófono', 'Microphone'));
+  }
+}
+
 function toggleMute() {
   resumeMeter();
   meter.speaker = !meter.speaker;
@@ -635,6 +689,7 @@ function toggleFull() {
 $('btn-shot').addEventListener('click', shot);
 $('btn-clip').addEventListener('click', clip);
 $('btn-rec').addEventListener('click', record);
+$('btn-rec-pause').addEventListener('click', toggleRecordingPause);
 $('cancel-detail').addEventListener('click', async () => {
   try { await callTool('transcribe_cancel_reread'); await refreshStatus(); } catch (err) { fail(err); }
 });

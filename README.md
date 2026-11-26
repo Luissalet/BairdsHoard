@@ -31,7 +31,7 @@ Baird's Hoard turns an HDMI capture device into a tool for working with another 
 | **Mini view** (`P`) | Always-on-top Picture-in-Picture window to keep an eye on the other computer. |
 | **Copilot** | An assistant guides you live while you keep working on the other computer. It draws on top of the live picture: a red dot where to click, boxes, arrows for a drag, the text to type next to its field, the keys to press. The instruction of each step is a subtitle under the picture (inside it in full screen), and a conversation beside it is where the assistant talks to you and you answer; a switch reads it all aloud. Baird goes to the next step by itself: it watches the picture and reads its text (the OCR that ships with Windows, on this PC), so the assistant is only called when a plan ends or you press **Ayuda**. A mark can name the text it points at (`"click": "Guardar"`): Baird finds it, follows it when the page scrolls and shows it as soon as it is on screen, so a whole plan can be sent at once. The **Copilot** button in the top bar copies the address to hand to any chat, `http://127.0.0.1:5232/copilot`: the assistant reads there how to use it and starts. |
 | **Global shortcuts** | Ctrl+Alt+C (screenshot) and Ctrl+Alt+X (last seconds) even when Baird is not focused; configurable in Settings. A small helper registers them with Windows and ends with the app. |
-| **Assistants** | 40 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find` guide the person live; `clip_save`, `record_start/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
+| **Assistants** | 40 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find` guide the person live; `clip_save`, `record_start/pause/resume/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
 
 Other keys: `M` sound, `F` full screen (double click on the picture also). While a copilot guides: `Space` (or `Enter`, `→`) step done, `←` back, `H` help.
 
@@ -73,7 +73,7 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
-shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default). The copilot has its own too (`copilot`): whether an assistant may draw over the live picture (the switch is in the Copilot button), the size of the picture it gets when it looks, the minutes after which a session nobody touches ends, and the language Windows reads the screen in.
+shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default). The optional Windows monitor source captures a selected display with system loopback and an optional microphone track. See [capture sources](docs/CAPTURE_SOURCES.md) for the process flag and selection API. The copilot has its own too (`copilot`): whether an assistant may draw over the live picture (the switch is in the Copilot button), the size of the picture it gets when it looks, the minutes after which a session nobody touches ends, and the language Windows reads the screen in.
 
 ## Connection with Faustus and Hoard Hub
 
@@ -83,7 +83,7 @@ The Hub starts and stops the app from its tile and the plugin manifest `faustus-
 
 | Group | Tools |
 |---|---|
-| Capture | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_stop` |
+| Capture | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_pause`, `record_resume`, `record_stop` |
 | Library | `media_list`, `media_look`, `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list` |
 | Text | `media_search`, `media_ocr`, `ocr_reindex` |
 | Faustus | `send_to_faustus` |
@@ -103,7 +103,7 @@ This app carries procedures from the skill library of the family's workspace for
 | `GET /api/health` | service, capture state, input resolution |
 | `GET /api/status` | capture, recording, jobs, viewers and retry timing |
 | `POST /api/capture/retry` | advance a pending retry while there is demand, within the hourly limit; `?manual=true` (the viewer's button) opens once past it |
-| `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | the three buttons |
+| `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/pause`, `/api/record/resume`, `/api/record/stop` | capture and recording controls |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | library, files, thumbnails |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | file actions |
 | `POST /api/snapshot` with `{"region": {x,y,w,h,unit}}` | zone screenshot |

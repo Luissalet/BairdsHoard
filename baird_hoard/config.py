@@ -15,6 +15,7 @@ from .hoard_link.atomic import read_json, write_json_atomic
 from .hoard_link.guard import parse_allowed_hosts
 from .enhance import DEFAULT_ENHANCE, normalize_enhance
 from .hotkeys import normalize_hotkey
+from .monitor_source import normalize_selection
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,6 +55,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "audio_input": "hdmi",       # hdmi (the sound that comes with the picture) or line (the 3.5 mm input)
     "capture_always_on": False,  # opt in to capture even without viewers, recordings or rules
     "capture_enabled": True,     # off frees the device for other programs
+    "monitor": None,             # stable monitor selection from /api/monitors
+    "monitor_microphone": False, # separate microphone track, explicitly enabled
     "light_height": 720,         # "light copy" of a video: height in pixels
     "light_kbps": 2500,          # "light copy" of a video: video bitrate
     "ocr_auto": True,            # read the text of every new screenshot in the background (Kafka's OCR)
@@ -79,6 +82,7 @@ class Config:
     background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
     isolated_instance: bool = False
     synthetic_capture: bool = False  # opt in to the marked, device-free test source
+    monitor_capture: bool = False    # use the explicitly selected desktop monitor
 
     @property
     def paths(self) -> AppPaths:
@@ -118,6 +122,7 @@ class Config:
             background=not isolated_instance,
             isolated_instance=isolated_instance,
             synthetic_capture=env_flag("BAIRD_SYNTHETIC_CAPTURE"),
+            monitor_capture=env_flag("BAIRD_MONITOR_CAPTURE"),
         )
 
 
@@ -163,7 +168,7 @@ class Settings:
                     continue
                 if key not in DEFAULT_SETTINGS:
                     raise ValueError(f"Unknown setting: {key}")
-                if value is None:
+                if value is None and key != "monitor":
                     continue
                 data[key] = (normalize_enhance(value, data[key]) if key == "enhance" else
                              normalize_copilot(value, data[key]) if key == "copilot" else value)
@@ -185,6 +190,8 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     if data["audio_input"] not in AUDIO_INPUTS and not (data["audio_input"].isdigit() and len(data["audio_input"]) == 1):
         raise ValueError("audio_input must be hdmi, line, spdif or a crossbar input number")
     data["capture_enabled"] = bool(data["capture_enabled"])
+    data["monitor"] = normalize_selection(data["monitor"])
+    data["monitor_microphone"] = data["monitor_microphone"] is True
     data["capture_always_on"] = data["capture_always_on"] is True
     data["light_height"] = int(min(max(int(data["light_height"]), 240), 1080))
     data["light_kbps"] = int(min(max(int(data["light_kbps"]), 300), 20000))
