@@ -255,7 +255,10 @@ def settings_put(request: Request, body: dict[str, Any]):
 
 @router.get("/api/devices")
 def devices(request: Request):
-    if services(request).config.fake:
+    config = services(request).config
+    if config.synthetic_capture:
+        return {"devices": ["synthetic"]}
+    if config.fake:
         return {"devices": ["demo"]}
     return {"devices": list_devices()}
 

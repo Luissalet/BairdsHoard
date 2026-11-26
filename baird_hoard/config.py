@@ -78,6 +78,7 @@ class Config:
     fake_source: str = ""           # with ``fake``: loop this video file instead of the test pattern
     background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
     isolated_instance: bool = False
+    synthetic_capture: bool = False  # opt in to the marked, device-free test source
 
     @property
     def paths(self) -> AppPaths:
@@ -116,6 +117,7 @@ class Config:
             fake_source=env_str("BAIRD_FAKE_SOURCE") or "",
             background=not isolated_instance,
             isolated_instance=isolated_instance,
+            synthetic_capture=env_flag("BAIRD_SYNTHETIC_CAPTURE"),
         )
 
 
