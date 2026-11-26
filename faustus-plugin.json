@@ -2,13 +2,18 @@
   "schema": 1,
   "id": "baird",
   "name": "Baird's Hoard",
-  "purpose": "Shows the screen of another computer connected through an HDMI capture device (AVerMedia Live Gamer Portable Lite GL310 / C875) live in a window, and with one click saves a screenshot, the last seconds as a clip or a recording; every file can be dragged or copied straight into a chat. Assistants can look at that screen (the picture comes back as an image), save screenshots, clips and recordings, and guide the person live on it: marks drawn over the live picture (where to click, what to type), one instruction per step and a conversation, with Baird moving from step to step by itself.",
+  "purpose": "Shows a live HDMI capture or a selected monitor in the opt-in Windows monitor profile. Saves screenshots, recent clips and pausable MP4 recordings. Assistants can list available sources, prepare a choice, look at the live picture and guide the person. The person turns on a local display in Baird.",
   "capabilities": [
     "hdmi-capture",
+    "monitor-capture",
+    "source-selection",
+    "system-audio-loopback",
+    "optional-microphone-track",
     "live-view",
     "screenshot",
     "instant-replay",
     "recording",
+    "recording-pause",
     "document-transcription",
     "drag-and-drop",
     "clipboard",
@@ -89,6 +94,6 @@
       "BAIRD_DATA_DIR"
     ]
   },
-  "notes": "screen_look returns the current picture of the other computer as an image (and keeps it as a screenshot unless save=false); media_look shows a saved file. clip_save copies the last seconds from memory without re-encoding; record_start / record_stop record picture and sound. Files live in the media folder (default Videos\\Baird); media_list gives their paths. The device needs the AVerMedia GL310 driver (AVer835_x64.inf, WHQL) and nothing else from AVerMedia: the app reads the hardware H.264 encoder directly. copilot_show guides the person live (steps with marks over the picture; point at things by the text they show); GET <APP_URL>/copilot is the page an assistant without the connector reads to do the same over HTTP. Pictures of the other computer may show private information.",
+  "notes": "source_list reports the current mode and available monitor identities. source_select prepares a source and returns an undo token on changes. The person controls local activation. Live agent calls return source_off while the selected screen is off. capture and copilot tools can check a requested source. screen_look returns an image and saves a screenshot unless save=false. record_start, record_pause, record_resume and record_stop save the active spans as MP4. The monitor profile offers system audio and an optional microphone track. Saved media is available through media_list and media_look. HDMI requires the capture card driver. The shared selector, privacy policy and desktop overlay have separate integration work.",
   "skills": {"slugs": ["screen-capture-evidence", "systematic-debugging"], "limit": 2}
 }

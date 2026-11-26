@@ -31,7 +31,7 @@ Baird's Hoard turns an HDMI capture device into a tool for working with another 
 | **Mini view** (`P`) | Always-on-top Picture-in-Picture window to keep an eye on the other computer. |
 | **Copilot** | An assistant guides you live while you keep working on the other computer. It draws on top of the live picture: a red dot where to click, boxes, arrows for a drag, the text to type next to its field, the keys to press. The instruction of each step is a subtitle under the picture (inside it in full screen), and a conversation beside it is where the assistant talks to you and you answer; a switch reads it all aloud. Baird goes to the next step by itself: it watches the picture and reads its text (the OCR that ships with Windows, on this PC), so the assistant is only called when a plan ends or you press **Ayuda**. A mark can name the text it points at (`"click": "Guardar"`): Baird finds it, follows it when the page scrolls and shows it as soon as it is on screen, so a whole plan can be sent at once. The **Copilot** button in the top bar copies the address to hand to any chat, `http://127.0.0.1:5232/copilot`: the assistant reads there how to use it and starts. |
 | **Global shortcuts** | Ctrl+Alt+C (screenshot) and Ctrl+Alt+X (last seconds) even when Baird is not focused; configurable in Settings. A small helper registers them with Windows and ends with the app. |
-| **Assistants** | 40 MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find` guide the person live; `clip_save`, `record_start/pause/resume/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
+| **Assistants** | MCP tools. `screen_look` returns the current picture as an image, so an assistant can see the other computer; `copilot_show`, `copilot_wait`, `copilot_look`, `copilot_find` guide the person live; `clip_save`, `record_start/pause/resume/stop`, `media_list`, `media_look`, `media_copy`, `enhance_set`, `enhance_status`, `enhance_benchmark`, `media_enhance`… |
 
 Other keys: `M` sound, `F` full screen (double click on the picture also). While a copilot guides: `Space` (or `Enter`, `→`) step done, `←` back, `H` help.
 
@@ -85,6 +85,7 @@ The Hub starts and stops the app from its tile and the plugin manifest `faustus-
 
 | Group | Tools |
 |---|---|
+| Sources | `source_list`, `source_select`, `source_undo` |
 | Capture | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_pause`, `record_resume`, `record_stop` |
 | Library | `media_list`, `media_look`, `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list` |
 | Text | `media_search`, `media_ocr`, `ocr_reindex` |
@@ -95,6 +96,8 @@ The Hub starts and stops the app from its tile and the plugin manifest `faustus-
 
 `snapshot_save` and `screen_look` accept a `region`. The same handlers serve the web UI (`POST /api/ui/call`) and `POST /api/agent/call` (Bearer token
 from `data/mcp-token`).
+
+Use `source_list` to read the available modes and the selected display. `source_select` prepares a source and returns a token for `source_undo` when the choice changes. The person enables a local screen in Baird. Capture, recording and copilot calls accept an optional `source` object with `mode` and `monitor` to check the expected source. Saved library items use the media tools. The live desktop overlay and the combined selector and privacy integration are delivered separately. [Agent source contract](docs/AGENT_SOURCES.md)
 
 This app carries procedures from the skill library of the family's workspace for the agents that connect to it: `screen-capture-evidence`, `systematic-debugging`. They are named in what an agent reads on connecting, read with `skills_list` and `skill_read`, searched and assigned with `skills_library` and `skills_assign`, and offered as prompts. The person chooses them on the skills page (`/api/agent/skills/page`) or in the Hub's Skills tab; the `skills` block of `faustus-plugin.json` holds what the app asks for by default.
 
