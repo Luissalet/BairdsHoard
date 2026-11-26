@@ -99,7 +99,8 @@ Measured on 26 November 2026 with a laptop that showed on the pass-through monit
   on the pass-through goes black for a moment, the encoder delivers about three seconds of 1080p video with
   audio (some 90 frames each time) and then stops again.
 - That matches a source that sends the picture in the clear while the handshake runs and encrypts it afterwards.
-  The driver exposes no HDCP status to confirm it.
+  The driver exposes no HDCP status. Turning HDCP support off for that output in the laptop's graphics settings
+  and restarting it confirmed the cause: the next opening delivered a continuous 1080p picture with audio.
 
 The helper therefore never switches inputs to recover a silent device: it blanks the pass-through monitor and
 yields three seconds. The remedy is on the source, in its graphics settings where the driver allows turning
