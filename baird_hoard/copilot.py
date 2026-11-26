@@ -695,6 +695,11 @@ class Copilot:
             out["_image"] = {"data": base64.b64encode(jpeg).decode("ascii"), "mime": "image/jpeg"}
         return out
 
+    def clear_looks(self) -> None:
+        with self._cond:
+            self._looks.clear()
+            self._last_look = None
+
     def look_image(self, look_id: str) -> bytes:
         with self._cond:
             look = self._looks.get(look_id)

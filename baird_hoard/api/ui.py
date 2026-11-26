@@ -260,7 +260,11 @@ def settings_get(request: Request):
 
 @router.put("/api/settings")
 def settings_put(request: Request, body: dict[str, Any]):
-    return services(request).apply_settings(body)
+    svc = services(request)
+    if svc.monitor_source is not None and {"capture_enabled", "monitor", "monitor_microphone"} & body.keys():
+        if request.headers.get("authorization") or request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+            raise BairdError("source_activation_required", "Change local screen settings in Baird on this computer.", status=403)
+    return svc.apply_settings(body)
 
 
 @router.get("/api/devices")

@@ -19,6 +19,7 @@ from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from ..agent_sources import call_on_source
 from ..copilot import brief
 from ..errors import BairdError
 from .deps import services
@@ -91,6 +92,11 @@ def _look_mode(value: Any) -> str:
     return value if value in ("auto", "always", "never") else "auto"
 
 
+def _live(request: Request, call):
+    svc = services(request)
+    return call_on_source(svc, None, lambda: call(svc.copilot))
+
+
 @router.get("/copilot")
 def copilot_brief(request: Request):
     svc = services(request)
@@ -114,25 +120,26 @@ def copilot_status(request: Request):
 @router.post("/copilot/say")
 async def copilot_show(request: Request):
     body = await _body(request)
-    copilot = services(request).copilot
     wait_s, each, look = _number(body.get("wait_s"), 0.0), body.get("each") is True, _look_mode(body.get("look"))
-    out = await _patiently(request, lambda gone: copilot.show(body, wait_s=wait_s, each=each, look=look, gone=gone))
+    out = await _patiently(request, lambda gone: _live(
+        request, lambda copilot: copilot.show(body, wait_s=wait_s, each=each, look=look, gone=gone)))
     return _with_look_url(request, out)
 
 
 @router.post("/copilot/wait")
 async def copilot_wait_post(request: Request):
     body = await _body(request)
-    copilot = services(request).copilot
     wait_s, each, look = _number(body.get("wait_s"), 60.0), body.get("each") is True, _look_mode(body.get("look"))
-    out = await _patiently(request, lambda gone: copilot.wait(wait_s, each=each, look=look, gone=gone))
+    out = await _patiently(request, lambda gone: _live(
+        request, lambda copilot: copilot.wait(wait_s, each=each, look=look, gone=gone)))
     return _with_look_url(request, out)
 
 
 @router.get("/copilot/wait")
 async def copilot_wait_get(request: Request, wait_s: float = 60.0, each: bool = False, look: str = "auto"):
-    copilot, mode = services(request).copilot, _look_mode(look)
-    out = await _patiently(request, lambda gone: copilot.wait(_number(wait_s, 0.0), each=each, look=mode, gone=gone))
+    mode = _look_mode(look)
+    out = await _patiently(request, lambda gone: _live(
+        request, lambda copilot: copilot.wait(_number(wait_s, 0.0), each=each, look=mode, gone=gone)))
     return _with_look_url(request, out)
 
 
@@ -148,21 +155,25 @@ def _region(raw: str) -> Any:
 @router.get("/copilot/look.jpg")
 def copilot_look(request: Request, w: int = 0, region: str = ""):
     """The screen now as a JPEG. Its pixels are the coordinates marks are given in from now on."""
-    copilot = services(request).copilot
-    out = copilot.look(max_side=w or None, region=_region(region))
-    return Response(copilot.look_image(out["look"]), media_type="image/jpeg",
-                    headers={**NO_STORE, "X-Copilot-Look": out["look"], "X-Copilot-Space": f"{out['space'][0]}x{out['space'][1]}"})
+    def look(copilot):
+        out = copilot.look(max_side=w or None, region=_region(region))
+        return Response(copilot.look_image(out["look"]), media_type="image/jpeg",
+                        headers={**NO_STORE, "X-Copilot-Look": out["look"],
+                                 "X-Copilot-Space": f"{out['space'][0]}x{out['space'][1]}"})
+
+    return _live(request, look)
 
 
 @router.get("/copilot/look/{name}")
 def copilot_look_kept(request: Request, name: str):
-    return Response(services(request).copilot.look_image(name.rsplit(".", 1)[0]), media_type="image/jpeg", headers=NO_STORE)
+    jpeg = _live(request, lambda copilot: copilot.look_image(name.rsplit(".", 1)[0]))
+    return Response(jpeg, media_type="image/jpeg", headers=NO_STORE)
 
 
 @router.get("/copilot/text")
 def copilot_text(request: Request, q: str = "", format: str = "text"):
     """Every text on screen as ``x,y text`` lines (or, with ``q``, where that text is). ``format=json`` for the data."""
-    out = services(request).copilot.texts(q)
+    out = _live(request, lambda copilot: copilot.texts(q))
     if format == "json":
         return out
     space = out.get("space")

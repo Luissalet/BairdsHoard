@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from .agent_sources import SourceArgs, SourceBoundArgs, SourceUndoArgs, call_on_source
 from .enhance import DEFAULT_ENHANCE, EFFECT_KEYS, OFF, demo_sample, effects_on, normalize_enhance
 from .errors import BairdError
 from .hoard_link.agentkit import Empty, Tool, ann
@@ -15,14 +17,15 @@ from .hoard_link.agentkit import tool_catalog as _catalog
 from .hoard_link.agentkit import uncapped  # noqa: F401 - re-exported for the UI routes
 from .services import Services
 
-AGENT_INSTRUCTIONS = """Baird's Hoard shows what another computer puts on the HDMI capture device plugged into this PC (an AVerMedia Live Gamer Portable Lite) and keeps the last minutes in memory.
-screen_look returns the current picture of the other computer as an image (and saves it as a screenshot); use it to see what the user is looking at on that device. capture_status says whether there is a picture (state running), the input resolution and how many seconds are kept; state stuck means the device stopped responding and the user has to unplug and replug its USB cable (say so).
+AGENT_INSTRUCTIONS = """Baird's Hoard shows the selected capture source and keeps the last minutes in memory.
+Use source_list to find the current mode, whether it is enabled, and the available display IDs. source_select prepares a source and returns an undo_token when the choice changes. The person turns on a local screen in Baird. If a live call returns source_off, ask them to turn it on. The optional source object on capture, recording and copilot tools checks the expected mode and monitor without switching.
+screen_look returns the live picture as an image and saves it as a screenshot unless save=false. capture_status gives the input resolution and buffered seconds. For HDMI, state stuck means the person needs to unplug and reconnect the capture card.
 clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_pause / record_resume / record_stop control the recording. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
 snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds visible text in screenshots, recordings and saved reports and returns timestamped excerpts; media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
 enhance_set turns the GPU enhancement on and chooses the effects (denoise, upscale, sharpen, interpolate, hdr): the live view, clips and recordings then use the enhanced picture (screen_look and screenshots stay the original). enhance_status shows what it does now and what each effect costs per frame; enhance_benchmark measures that cost on a sample; media_enhance writes an enhanced copy of a saved video.
-Copilot mode guides the person live on that screen: copilot_show draws steps over the live picture (a red dot where to click, boxes, arrows, the text to type, the keys to press) with one short instruction each as a subtitle under it, and Baird moves from step to step by itself by watching the screen, so send the whole plan in one call and let it wait (wait_s); it answers when the plan is done or the person needs you, with the picture. Its message is you talking to the person in the conversation beside the picture, where they can write back (event say). Point at things by the text they show ("click": "Guardar") whenever they have one: no look needed and it follows scrolling. copilot_look is the cheap way to see the screen while guiding (nothing is saved), copilot_find says where a text is, copilot_wait waits for the person, copilot_stop ends the session. You cannot click or type on the other computer: the person does it.
-Pictures of the other computer can show private information of the user: describe only what the task needs."""
+Copilot mode guides the person live on that screen: copilot_show draws steps over the live picture (a red dot where to click, boxes, arrows, the text to type, the keys to press) with one short instruction each as a subtitle under it, and Baird moves from step to step by itself by watching the screen, so send the whole plan in one call and let it wait (wait_s); it answers when the plan is done or the person needs you, with the picture. Its message is you talking to the person in the conversation beside the picture, where they can write back (event say). Point at things by the text they show ("click": "Guardar") whenever they have one: no look needed and it follows scrolling. copilot_look is the cheap way to see the screen while guiding (nothing is saved), copilot_find says where a text is, copilot_wait waits for the person, copilot_stop ends the session. The person clicks and types during guidance.
+A captured picture may contain private information. Describe what the task needs."""
 
 
 def _d(first: str, detail: str = "", synonyms: str = "") -> str:
@@ -42,18 +45,18 @@ class RegionArg(BaseModel):
     unit: Literal["px", "fraction"] = Field("px", description="px = pixels of the input picture (capture_status gives its size); fraction = 0..1 of the width/height.")
 
 
-class LookArgs(BaseModel):
+class LookArgs(SourceBoundArgs):
     save: bool = Field(True, description="Also keep it in the library as a screenshot.")
     max_side: int = Field(1568, ge=320, le=3840, description="Longest side of the image returned to the assistant.")
     region: Optional[RegionArg] = Field(None, description="Look at only this rectangle of the screen.")
 
 
-class SnapshotArgs(BaseModel):
+class SnapshotArgs(SourceBoundArgs):
     format: Optional[Literal["png", "jpg"]] = Field(None, description="png (exact pixels) or jpg; default from settings.")
     region: Optional[RegionArg] = Field(None, description="Save only this rectangle of the screen (a zone capture).")
 
 
-class TranscribeArgs(BaseModel):
+class TranscribeArgs(SourceBoundArgs):
     region: Optional[RegionArg] = None
     detail: Literal["auto", "off", "document", "code"] = "auto"
 
@@ -65,7 +68,7 @@ class SearchArgs(BaseModel):
     after: Optional[float] = Field(None, ge=0, allow_inf_nan=False, description="Return moments after this playback second.")
 
 
-class ClipArgs(BaseModel):
+class ClipArgs(SourceBoundArgs):
     seconds: Optional[float] = Field(None, ge=1, le=600, description="How many seconds back; default from settings (30).")
 
 
@@ -98,7 +101,7 @@ class SendArgs(NameArg):
     message: str = Field("", max_length=4000, description="Text to leave in the chat's message box next to the file.")
 
 
-class WatchAddArgs(BaseModel):
+class WatchAddArgs(SourceBoundArgs):
     name: Optional[str] = Field(None, max_length=80, description="Name shown in the alert; a default is made from the rule.")
     kind: Literal["change", "text"] = Field("change", description="change = compare the zone's pixels; text = read the zone with OCR.")
     mode: Optional[Literal["change", "still", "appears", "disappears"]] = Field(
@@ -115,7 +118,7 @@ class WatchAddArgs(BaseModel):
     enabled: Optional[bool] = None
 
 
-class WatchIdArgs(BaseModel):
+class WatchIdArgs(SourceBoundArgs):
     id: str = Field(..., min_length=1, max_length=40, description="Rule id from watch_list.")
 
 
@@ -170,17 +173,18 @@ class EnhanceFileArgs(NameArg, EffectArgs):
 class EnhanceBenchArgs(EffectArgs):
     source: str = Field("demo", max_length=260, description="demo = a synthetic noisy video (no capture needed), live = the last seconds of the capture, or a video's name from media_list.")
     size: Literal["720p", "1080p"] = Field("720p", description="Picture size of the demo sample.")
+    capture_source: SourceArgs | None = Field(None, description="Expected capture source when source=live.")
     frames: int = Field(150, ge=30, le=600, description="Frames the longer run of each measurement processes (a third of them for the shorter).")
 
 
-class CopilotLookArgs(BaseModel):
+class CopilotLookArgs(SourceBoundArgs):
     max_side: Optional[int] = Field(None, ge=320, le=2048, description="Longest side of the picture you get (default 1024); smaller costs you less.")
     region: Optional[list[float]] = Field(None, min_length=4, max_length=4, description="[x, y, w, h] in the coordinates of your last look: zoom into that part instead of asking for a bigger picture.")
     text: bool = Field(False, description="Also list every text on screen as \"x,y text\" (its centre).")
     image: bool = Field(True, description="false: no picture, only what else was asked (with text=true, the cheapest way to read labels).")
 
 
-class CopilotShowArgs(BaseModel):
+class CopilotShowArgs(SourceBoundArgs):
     steps: list[Any] = Field(default_factory=list, max_length=40, description=(
         "The steps, in order; each is an object (or just a sentence). Fields: say (one short imperative sentence in the person's "
         "language: the subtitle under the picture), then what to draw: click / dbl / right (a place), type (the text to type, with at = where), keys (\"Ctrl+S\"), "
@@ -200,21 +204,21 @@ class CopilotShowArgs(BaseModel):
     space: Optional[list[float]] = Field(None, min_length=2, max_length=2, description="[width, height] your coordinates are measured on, when it is not your last look.")
 
 
-class RecordingTargetArgs(BaseModel):
+class RecordingTargetArgs(SourceBoundArgs):
     target: Optional[str] = Field(None, max_length=255, description="Restrict the action to the named active recording.")
 
 
-class CopilotWaitArgs(BaseModel):
+class CopilotWaitArgs(SourceBoundArgs):
     wait_s: float = Field(45, ge=0, le=150, description="Longest wait in seconds.")
     look: Literal["auto", "always", "never"] = "auto"
     each: bool = False
 
 
-class CopilotFindArgs(BaseModel):
+class CopilotFindArgs(SourceBoundArgs):
     text: str = Field("", max_length=200, description="The text to find; empty lists every text on screen.")
 
 
-class CopilotStopArgs(BaseModel):
+class CopilotStopArgs(SourceBoundArgs):
     message: str = Field("", max_length=240, description="A last line for the person (\"Listo\").")
 
 
@@ -320,6 +324,9 @@ def _delete(svc: Services, a: DeleteArgs) -> dict[str, Any]:
 
 def _settings_set(svc: Services, a: SettingsArgs) -> dict[str, Any]:
     changes = a.model_dump(exclude_none=True)
+    if "capture_enabled" in changes and svc.sources.status()["mode"] != "hdmi":
+        raise BairdError("source_activation_required", "Local screen activation is controlled in Baird.",
+                         "Ask the person to use the source control in Baird.", status=403)
     if not changes:
         raise BairdError("invalid", "Nothing to change.")
     return svc.apply_settings(changes)
@@ -331,33 +338,42 @@ def _watch_check(svc: Services, a: WatchIdArgs) -> dict[str, Any]:
 
 
 TOOLS: list[Tool] = [
-    Tool("capture_status", _d("Whether the other computer's picture is coming in, its resolution and what is being recorded.",
+    Tool("source_list", _d("List the selected source, activation and available display identities.",
+                           synonyms="listar fuentes, pantallas disponibles"),
+         Empty, ann(read_only=True), lambda s, a: s.sources.status(list_displays=True)),
+    Tool("source_select", _d("Choose an available source. The person activates a local screen in Baird.",
+                             "Returns an undo token if the choice changes.", "elegir fuente, seleccionar pantalla"),
+         SourceArgs, ann(), lambda s, a: s.sources.select(a.mode, a.monitor)),
+    Tool("source_undo", _d("Undo the choice using its undo_token. A restored local display stays off.",
+                           synonyms="deshacer selección de fuente"),
+         SourceUndoArgs, ann(), lambda s, a: s.sources.undo(a.undo_token)),
+    Tool("capture_status", _d("Report the selected source, picture, resolution, buffer and recording.",
                               synonyms="estado, señal, capturadora"),
-         Empty, ann(read_only=True), lambda s, a: s.status()),
-    Tool("capture_retry", _d("Retry a failed capture now while there is demand, subject to the hourly limit."),
-         Empty, ann(), lambda s, a: s.engine.retry_now()),
-    Tool("screen_look", _d("See the other computer's screen now: returns the current picture as an image.",
+         SourceBoundArgs, ann(read_only=True), lambda s, a: s.status()),
+    Tool("capture_retry", _d("Retry the selected source while there is demand. The HDMI opening limit still applies."),
+         SourceBoundArgs, ann(), lambda s, a: s.engine.retry_now()),
+    Tool("screen_look", _d("Return the current image from the selected capture source.",
                            "Saved as a screenshot unless save=false.", "ver pantalla, captura, qué hay en el otro ordenador"),
          LookArgs, ann(), _look, timeout_s=30, capped=False),
-    Tool("snapshot_save", _d("Save a screenshot of the other computer to the library (no image returned).",
+    Tool("snapshot_save", _d("Save a screenshot of the selected source to the library.",
                              "With region it saves only that rectangle (a zone capture, named «Captura zona ...»).",
                              "captura, pantallazo, captura de una zona, recortar"),
          SnapshotArgs, ann(draft_safe=True), lambda s, a: s.library.snapshot(a.format, _region(a)), timeout_s=30),
-    Tool("clip_save", _d("Save the last N seconds of the other computer as an MP4 clip.",
+    Tool("clip_save", _d("Save the last N seconds of the selected source as an MP4 clip.",
                          "Instant (copied from memory, no re-encoding).", "clip, últimos segundos, repetición"),
          ClipArgs, ann(draft_safe=True), lambda s, a: s.library.clip(a.seconds), timeout_s=120),
-    Tool("record_start", _d("Start recording the other computer (picture and sound) until record_stop.", synonyms="grabar"),
-         Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.start()),
+    Tool("record_start", _d("Start recording the selected source (picture and sound).", synonyms="grabar"),
+         SourceBoundArgs, ann(draft_safe=True), lambda s, a: s.library.recorder.start()),
     Tool("record_pause", _d("Pause recording. Resume with record_resume for the same target.", synonyms="pausar grabación"),
          RecordingTargetArgs, ann(idempotent=True), lambda s, a: s.library.recorder.pause(target=a.target)),
     Tool("record_resume", _d("Resume the paused recording. Use record_pause to pause again.", synonyms="reanudar grabación"),
          RecordingTargetArgs, ann(idempotent=True), lambda s, a: s.library.recorder.resume(target=a.target), timeout_s=30),
     Tool("record_stop", _d("Stop the recording; the MP4 appears in the library a moment later.", synonyms="parar grabación"),
-         Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.stop()),
+         RecordingTargetArgs, ann(draft_safe=True), lambda s, a: s.library.recorder.stop(target=a.target)),
     Tool("transcribe_start", _d("Record the screen and transcribe the document locally while it scrolls. Optionally select its region."),
          TranscribeArgs, ann(draft_safe=True), lambda s, a: s.transcriber.start(_region(a), a.detail), timeout_s=30),
     Tool("transcribe_stop", _d("Finish the document and its recording. Poll capture_status.transcription for the HTML path."),
-         Empty, ann(draft_safe=True), lambda s, a: s.transcriber.stop()),
+         SourceBoundArgs, ann(draft_safe=True), lambda s, a: s.transcriber.stop()),
     Tool("transcribe_reread", _d("Transcribe a library MP4 or reread a Baird HTML with local UnlimitedOCR. Automatic video mode reconstructs numbered files. Poll capture_status.transcription.detail."),
          RereadArgs, ann(draft_safe=True), lambda s, a: s.transcriber.detail.start(s.library.path_of(a.name), a.mode)),
     Tool("transcribe_cancel_reread", _d("Cancel the current GPU rereading job. The original recording and Windows transcription are retained."),
@@ -398,9 +414,9 @@ TOOLS: list[Tool] = [
                          "changing stops (a long process finished). kind=text reads the zone with OCR and fires when `text` appears or disappears. "
                          "An alert saves a picture of the zone («Aviso ...»), notifies the person through the Hub and posts `baird.watch` on the family bus.",
                          "avisar cuando acabe, detectar cambios, vigilar un texto"),
-         WatchAddArgs, ann(), lambda s, a: s.watch.add(a.model_dump(exclude_unset=True, exclude_none=True))),
+         WatchAddArgs, ann(), lambda s, a: s.watch.add(a.model_dump(exclude_unset=True, exclude_none=True, exclude={"source"}))),
     Tool("watch_update", _d("Change a watch rule (or pause it with enabled=false)."), WatchUpdateArgs, ann(idempotent=True),
-         lambda s, a: s.watch.update(a.id, a.model_dump(exclude_unset=True, exclude_none=True, exclude={"id"}))),
+         lambda s, a: s.watch.update(a.id, a.model_dump(exclude_unset=True, exclude_none=True, exclude={"id", "source"}))),
     Tool("watch_remove", _d("Delete a watch rule."), WatchIdArgs, ann(destructive=True), lambda s, a: s.watch.remove(a.id)),
     Tool("watch_check", _d("Look once now at a rule's zone and say what it sees (it fires the rule if the condition is met).",
                            "The first look of a rule only records the starting picture."),
@@ -427,7 +443,7 @@ TOOLS: list[Tool] = [
                              "Needs the effects chosen: denoise, upscale, sharpen, interpolate (mci allowed here), hdr (HEVC HDR10). The original is kept.",
                              "mejorar vídeo, superresolución, interpolar fotogramas"),
          EnhanceFileArgs, ann(draft_safe=True), _enhance_file),
-    Tool("copilot_show", _d("Guide the person live: draw steps over the other computer's live picture and wait for them.",
+    Tool("copilot_show", _d("Draw steps over the live picture from the selected source and wait for the person.",
                             "Starts a copilot session when there is none. Baird goes from step to step by itself (it watches the screen), so send "
                             "every step you already know in one call. Answers when the plan is done, the person asks for help or writes "
                             "(events help / say), a text you pointed at is not on screen (anchor_missing), a step takes too long (stalled) or "
@@ -438,14 +454,14 @@ TOOLS: list[Tool] = [
     Tool("copilot_wait", _d("Wait until the person you are guiding needs you (plan done, help, a message, a missing text, the end).",
                             "Call it again while still_waiting is true; stop after a stopped event."),
          CopilotWaitArgs, ann(read_only=True), lambda s, a: s.copilot.wait(a.wait_s, each=a.each, look=a.look), timeout_s=190, capped=False),
-    Tool("copilot_look", _d("See the other computer's screen while guiding: a small picture (nothing is saved) and, with text=true, every text on it with its place.",
+    Tool("copilot_look", _d("See a small live image of the selected source. With text=true, also list visible text and its positions.",
                             "Its pixels are the coordinates your next marks are read in. region zooms.", "mirar la pantalla, ver qué hay"),
          CopilotLookArgs, ann(read_only=True),
          lambda s, a: s.copilot.look(max_side=a.max_side, region=a.region, text=a.text, image=a.image), timeout_s=45, capped=False),
-    Tool("copilot_find", _d("Where a text is on the other computer's screen right now (no picture), or every text when none is named.",
+    Tool("copilot_find", _d("Find the position of text in the selected source, or list all visible text.",
                             "Coordinates are in the pixels of your last look. Use it to check a label before pointing at it."),
          CopilotFindArgs, ann(read_only=True), lambda s, a: s.copilot.texts(a.text), timeout_s=45),
-    Tool("copilot_status", _d("Where the copilot session is: step, what it is waiting for, texts it is still looking for."), Empty,
+    Tool("copilot_status", _d("Where the copilot session is: step, what it is waiting for, texts it is still looking for."), SourceBoundArgs,
          ann(read_only=True), lambda s, a: s.copilot.status()),
     Tool("copilot_stop", _d("End the copilot session and clear the marks; message is a last line for the person."),
          CopilotStopArgs, ann(idempotent=True), lambda s, a: s.copilot.stop(a.message)),
@@ -457,6 +473,35 @@ TOOLS: list[Tool] = [
          SettingsArgs, ann(idempotent=True), _settings_set),
 ]
 
+_LIVE_TOOLS = frozenset({
+    "capture_retry", "screen_look", "snapshot_save", "clip_save", "record_start", "record_resume",
+    "transcribe_start", "watch_check", "copilot_show", "copilot_wait", "copilot_look", "copilot_find",
+})
+_SOURCE_TOOLS = _LIVE_TOOLS | {
+    "capture_status", "record_pause", "record_stop", "transcribe_stop", "watch_add", "watch_update",
+    "watch_remove", "copilot_status", "copilot_stop", "enhance_benchmark",
+}
+
+
+def _bind_source(tool: Tool) -> Tool:
+    if tool.name not in _SOURCE_TOOLS:
+        return tool
+
+    def run(svc, args):
+        expected = args.source
+        live = tool.name in _LIVE_TOOLS
+        if tool.name == "enhance_benchmark":
+            if args.source != "live":
+                if args.capture_source is not None:
+                    raise BairdError("invalid", "capture_source is for a live benchmark.")
+                return tool.run(svc, args)
+            expected, live = args.capture_source, True
+        return call_on_source(svc, expected, lambda: tool.run(svc, args), live=live)
+
+    return replace(tool, run=run)
+
+
+TOOLS = [_bind_source(tool) for tool in TOOLS]
 TOOLS_BY_NAME = {t.name: t for t in TOOLS}
 
 
