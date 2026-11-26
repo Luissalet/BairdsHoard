@@ -56,6 +56,9 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
   every text with its place, `image=false` only the list) and saves nothing. Text that arrives garbled from a Windows console is put
   right. A session nobody touches ends after `copilot.idle_minutes` (15); `copilot.enabled` (the switch in the Copilot button) turns it
   all off.
+- When the selected source is **Overlay**, the same copilot session puts its marks and instruction bar on that display.
+  Hide it with Ctrl+Alt+Shift+F10 or the button in Baird's guide bar. The conversation and its controls stay in Baird.
+  Windows excludes the layer from capture by default. See [Copilot on the monitor](docs/COPILOT_OVERLAY.md).
 - Always-on-top mini view (button / key `P`, browser Picture-in-Picture).
 - Global shortcuts for capture (default Ctrl+Alt+C) and clip (Ctrl+Alt+X) even without focus, configurable in
   Settings (`hotkeys_status`). A small helper process registers them with Windows and dies with the app.

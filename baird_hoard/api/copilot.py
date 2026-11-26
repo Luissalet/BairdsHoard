@@ -188,11 +188,20 @@ async def copilot_user(request: Request):
     return await run_in_threadpool(copilot.user, str(body.get("action") or ""), str(body.get("text") or ""))
 
 
+@router.post("/copilot/overlay")
+async def copilot_overlay(request: Request):
+    body = await _body(request)
+    return await run_in_threadpool(services(request).copilot.overlay_control,
+                                   str(body.get("action") or ""), str(body.get("language") or ""))
+
+
 @router.websocket("/copilot/ws")
 async def copilot_ws(ws: WebSocket):
     """Every new state of the copilot, as JSON, for the page that draws it."""
     await ws.accept()
     copilot = ws.app.state.services.copilot
+    if copilot.overlay is not None:
+        copilot.overlay.set_language(ws.query_params.get("lang"))
     sub = copilot.subscribe(asyncio.get_running_loop())
 
     async def pump_in() -> None:

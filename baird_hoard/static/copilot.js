@@ -10,6 +10,16 @@
   const ADDRESS = `${location.origin}/copilot`;
   const PHRASE = `Lee ${ADDRESS} y guíame en directo en Baird: `;
   const SVG = 'http://www.w3.org/2000/svg';
+  const lang = /^en(?:-|$)/i.test(new URLSearchParams(location.search).get('lang') || navigator.language) ? 'en' : 'es';
+  const overlayText = lang === 'en' ? {
+    hide: 'Hide overlay', show: 'Show overlay', include: 'Include overlay in capture',
+    unavailable: 'Overlay unavailable on this display.', noShortcut: 'The hide shortcut is unavailable.',
+    includeHint: 'Includes the guidance in recordings and images the copilot sees.',
+  } : {
+    hide: 'Ocultar overlay', show: 'Mostrar overlay', include: 'Incluir el overlay en la captura',
+    unavailable: 'El overlay no está disponible en esta pantalla.', noShortcut: 'El atajo para ocultar el overlay no está disponible.',
+    includeHint: 'Incluye la guía en las grabaciones y en las imágenes que ve el copiloto.',
+  };
   const el = (tag, cls, text) => { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; };
   const note = (text, kind) => { if (typeof toast === 'function') toast(text, kind); };
   const keep = {
@@ -50,6 +60,11 @@
     catch (err) { note(err.message, 'err'); }
   }
 
+  async function overlayAct(action) {
+    try { apply(await call('/copilot/overlay', { action, language: lang })); }
+    catch (err) { note(err.message, 'err'); }
+  }
+
   async function load() {
     try {
       const res = await fetch('/copilot/state', { cache: 'no-store' });
@@ -61,7 +76,7 @@
 
   function listen() {
     if (ui.ws || document.hidden) return;
-    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/copilot/ws`);
+    const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/copilot/ws?lang=${lang}`);
     ui.ws = ws;
     ws.onopen = () => { ui.retry = 1000; ui.fails = 0; clearInterval(ui.timer); ui.timer = null; };
     ws.onmessage = (ev) => { try { apply(JSON.parse(ev.data)); } catch { /* not a state */ } };
@@ -343,6 +358,20 @@
       const help = button('Ayuda', 'Avisar al copilot de que no te sale (H)', askHelp);
       help.dataset.on = session.asked_help ? '1' : '0';
       acts.append(help);
+      const overlay = ui.state.overlay;
+      if (overlay?.available && !overlay.error) {
+        const action = overlay.hidden ? 'show' : 'hide';
+        const toggle = button(overlayText[action], overlay.shortcut ? overlay.combo : overlayText[action],
+          () => overlayAct(action));
+        toggle.id = 'cp-overlay-toggle';
+        toggle.lang = lang;
+        acts.append(toggle);
+      }
+      if (overlay?.error || (overlay?.visible && !overlay.shortcut)) {
+        const message = el('div', 'cp-mode', overlay.error ? overlayText.unavailable : overlayText.noShortcut);
+        message.lang = lang;
+        body.append(message);
+      }
     } else if (session.status === 'done') {
       body.append(el('div', 'cp-say', said || (session.count ? 'Hecho.' : 'El copilot está contigo.')));
       const waiting = session.count ? 'El copilot está mirando cómo ha quedado…' : 'El copilot está preparando los pasos…';
@@ -484,7 +513,7 @@
     renderHud(session);
     renderTalk(session);
     const box = layout();                 // after the bar: showing it under the picture changes the picture's size
-    renderMarks(session, box);
+    renderMarks(state?.overlay?.available && !state.overlay.error ? null : session, box);
     if (ui.panel) fillPanel();
   }
 
@@ -557,6 +586,17 @@
       now.append(demo);
     }
     panel.append(now);
+    if (state.overlay?.visible && !state.overlay.hidden) {
+      const capture = el('label');
+      capture.lang = lang;
+      capture.title = overlayText.includeHint;
+      const include = el('input');
+      include.type = 'checkbox';
+      include.checked = state.overlay.included;
+      include.addEventListener('change', () => overlayAct(include.checked ? 'include' : 'exclude'));
+      capture.append(include, overlayText.include);
+      panel.append(capture);
+    }
     const allow = el('label');
     const check = el('input');
     check.type = 'checkbox';

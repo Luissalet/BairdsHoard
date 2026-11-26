@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional
 from .copilot_steps import (ACTIONS, MAX_SAY, MAX_STEPS, MAX_TALK, STEP_KEYS, Space, _bad, _clamp, _numbers, clean_step, public_mark,
                             repair)
 from .errors import BairdError
+from .overlay import CopilotOverlay
 from .textmap import count_text, find_text, scaled, squash
 
 log = logging.getLogger("baird.copilot")
@@ -395,6 +396,7 @@ class Copilot:
         self._demand = False
         self._demand_key = object()
         self._tap_restart = False
+        self.overlay: CopilotOverlay | None = None
         self.text_error = ""
         self._sweep()
 
@@ -444,8 +446,10 @@ class Copilot:
 
     def _publish(self) -> None:
         self._rev += 1
-        if self._subs:
+        if self.overlay is not None or self._subs:
             state = self.state()
+            if self.overlay is not None:
+                self.overlay.update(state["session"])
             for sub in list(self._subs):
                 sub.push(state)
         self._cond.notify_all()
@@ -470,6 +474,10 @@ class Copilot:
             cfg = self._config()
             sess = self._session
             out: dict[str, Any] = {"enabled": cfg["enabled"], "rev": self._rev, "reads_text": bool(self.reader.available()), "session": None}
+            if self.overlay is not None:
+                overlay = self.overlay.status()
+                if overlay["available"]:
+                    out["overlay"] = overlay
             if sess is None:
                 return out
             now = self.clock()
@@ -886,9 +894,25 @@ class Copilot:
     def source_changed(self, running: bool) -> None:
         """A new capture session started or the picture went away (called by the capture engine's state hook)."""
         self._tap_restart = True
+        if self.overlay is not None:
+            self.overlay.source_changed(running)
+
+    def overlay_changed(self) -> None:
+        with self._cond:
+            self._publish()
+
+    def overlay_control(self, action: str, language: str | None = None) -> dict[str, Any]:
+        if self.overlay is None:
+            raise BairdError("unavailable", "Monitor overlay is unavailable.", status=409)
+        with self._cond:
+            self.overlay.control(action, language)
+            self._publish()
+            return self.state()
 
     def close(self) -> None:
         self._closed.set()
+        if self.overlay is not None:
+            self.overlay.close()
         with self._cond:
             sess = self._session
             if sess is not None and sess.status != "stopped":
