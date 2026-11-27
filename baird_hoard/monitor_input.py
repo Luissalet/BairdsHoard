@@ -88,6 +88,24 @@ class AudioGrants:
         finally:
             self.messages.put(b"")
 
+    def _settle_issued_grant(self):
+        try:
+            if self.audio.poll() is None:
+                self.audio.kill()
+        except OSError:
+            pass
+        while True:
+            try:
+                if self.audio.poll() is not None:
+                    return
+            except OSError:
+                pass
+            try:
+                if self.messages.get(timeout=0.05) == b"@complete":
+                    return
+            except queue.Empty:
+                pass
+
     def _serve(self):
         def native_call():
             try:
@@ -96,11 +114,9 @@ class AudioGrants:
                 if self.messages.get(timeout=AUDIO_DEADLINE) != b"@complete":
                     raise RuntimeError("The audio capture did not acknowledge its acquisition.")
             except (OSError, RuntimeError, queue.Empty):
-                # A grant without an acknowledgement could still be acted on.
-                # Reap that helper before releasing the authority's lease.
-                if self.audio.poll() is None:
-                    self.audio.kill()
-                self.audio.wait()
+                # A permission byte may already be in the helper. Keep the lease
+                # even if we cannot terminate it and until we know it is harmless.
+                self._settle_issued_grant()
                 raise RuntimeError("The audio capture did not acknowledge its acquisition.") from None
 
         try:

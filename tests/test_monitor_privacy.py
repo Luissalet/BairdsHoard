@@ -205,6 +205,68 @@ def test_native_audio_request_receives_no_grant_after_exclusion():
     assert not any(thread.is_alive() for thread in grants.threads)
 
 
+@pytest.mark.parametrize("resolution", ["acknowledged", "exited"])
+def test_timed_out_audio_grant_serializes_cutoff_even_when_kill_fails(monkeypatch, resolution):
+    from baird_hoard import monitor_input
+
+    monkeypatch.setattr(monitor_input, "AUDIO_DEADLINE", 0.05)
+    hub = HubDouble()
+    replies = queue.Queue()
+    permitted, kill_failed, closed, exited = [threading.Event() for _ in range(4)]
+    starting_cut, cutoff = threading.Event(), threading.Event()
+    samples = []
+
+    class Pipe:
+        def write(self, grant):
+            assert grant == b"1"
+            permitted.set()
+
+        def flush(self):
+            pass
+
+        def close(self):
+            closed.set()
+            replies.put(b"")
+
+    def kill():
+        kill_failed.set()
+        raise PermissionError("synthetic termination failure")
+
+    def cut():
+        starting_cut.set()
+        hub.change(private=True)
+        cutoff.set()
+
+    audio = SimpleNamespace(stdin=Pipe(), stderr=iter(replies.get, b""), kill=kill,
+                            poll=lambda: 0 if exited.is_set() else None)
+    grants = AudioGrants(audio, guard(hub))
+    revoke = threading.Thread(target=cut, daemon=True)
+    try:
+        replies.put(b"@acquire")
+        assert permitted.wait(4) and kill_failed.wait(4)
+        revoke.start()
+        assert starting_cut.wait(4)
+        assert not cutoff.wait(0.2) and not closed.is_set()
+        if resolution == "acknowledged":
+            samples.append(("GetBuffer", hub.state.private))
+            replies.put(b"@complete")
+        else:
+            exited.set()
+        assert cutoff.wait(4) and closed.wait(4)
+        assert isinstance(grants.failure, RuntimeError)
+        assert samples == ([("GetBuffer", False)] if resolution == "acknowledged" else [])
+        with pytest.raises(BairdError, match="Private mode"):
+            guard(hub).acquire("audio", lambda: pytest.fail("acquired audio after cutoff"))
+    finally:
+        exited.set()
+        replies.put(b"")
+        for thread in grants.threads:
+            thread.join(4)
+        if revoke.ident is not None:
+            revoke.join(4)
+    assert not any(thread.is_alive() for thread in (*grants.threads, revoke))
+
+
 def test_worker_declines_to_initialize_audio_or_encoder_without_policy(monkeypatch, capsys, tmp_path):
     import sys
 
