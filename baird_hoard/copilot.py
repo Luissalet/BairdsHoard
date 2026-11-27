@@ -35,6 +35,7 @@ from typing import Any, Callable, Optional
 from .copilot_steps import (ACTIONS, MAX_SAY, MAX_STEPS, MAX_TALK, STEP_KEYS, Space, _bad, _clamp, _numbers, clean_step, public_mark,
                             repair)
 from .errors import BairdError
+from .overlay import CopilotOverlay
 from .textmap import count_text, find_text, scaled, squash
 
 log = logging.getLogger("baird.copilot")
@@ -395,6 +396,7 @@ class Copilot:
         self._demand = False
         self._demand_key = object()
         self._tap_restart = False
+        self.overlay: CopilotOverlay | None = None
         self.text_error = ""
         self._sweep()
 
@@ -444,8 +446,8 @@ class Copilot:
 
     def _publish(self) -> None:
         self._rev += 1
-        if self._subs:
-            state = self.state()
+        if self.overlay is not None or self._subs:
+            state = self.state(publish_overlay=True)
             for sub in list(self._subs):
                 sub.push(state)
         self._cond.notify_all()
@@ -464,27 +466,32 @@ class Copilot:
 
     # ------------------------------------------------------------------ what the page and the assistant see
 
-    def state(self) -> dict[str, Any]:
+    def state(self, *, publish_overlay: bool = False) -> dict[str, Any]:
         """Everything the page draws."""
         with self._cond:
             cfg = self._config()
             sess = self._session
             out: dict[str, Any] = {"enabled": cfg["enabled"], "rev": self._rev, "reads_text": bool(self.reader.available()), "session": None}
-            if sess is None:
-                return out
-            now = self.clock()
-            info: dict[str, Any] = {"id": sess.id, "agent": sess.agent, "goal": sess.goal, "status": sess.status, "index": sess.index,
-                                    "count": len(sess.steps), "listening": sess.waiters > 0 or now - sess.agent_at < 20,
-                                    "asked_help": sess.help_at is not None, "message": sess.message, "ended_by": sess.ended_by,
-                                    "steps": [{"say": s["say"]} for s in sess.steps], "step": None, "log": list(sess.log)}
-            if sess.status == "active" and sess.run is not None:
-                step, run = sess.steps[sess.index], sess.run
-                mode = step["_mode"]
-                auto = mode != "manual" and not (mode == "change" and (run.ambient or run.blind))
-                info["step"] = {"n": sess.index + 1, "say": step["say"], "hint": step["hint"], "keys": step["keys"],
-                                "marks": [public_mark(m) for m in step["marks"]], "mode": mode, "auto": auto,
-                                "until_text": step["until"].get("text", "")}
-            out["session"] = info
+            if sess is not None:
+                now = self.clock()
+                info: dict[str, Any] = {"id": sess.id, "agent": sess.agent, "goal": sess.goal, "status": sess.status, "index": sess.index,
+                                        "count": len(sess.steps), "listening": sess.waiters > 0 or now - sess.agent_at < 20,
+                                        "asked_help": sess.help_at is not None, "message": sess.message, "ended_by": sess.ended_by,
+                                        "steps": [{"say": s["say"]} for s in sess.steps], "step": None, "log": list(sess.log)}
+                if sess.status == "active" and sess.run is not None:
+                    step, run = sess.steps[sess.index], sess.run
+                    mode = step["_mode"]
+                    auto = mode != "manual" and not (mode == "change" and (run.ambient or run.blind))
+                    info["step"] = {"n": sess.index + 1, "say": step["say"], "hint": step["hint"], "keys": step["keys"],
+                                    "marks": [public_mark(m) for m in step["marks"]], "mode": mode, "auto": auto,
+                                    "until_text": step["until"].get("text", "")}
+                out["session"] = info
+            if self.overlay is not None:
+                if publish_overlay:
+                    self.overlay.update(out["session"])
+                overlay = self.overlay.status()
+                if overlay["available"]:
+                    out["overlay"] = overlay
             return out
 
     def status(self) -> dict[str, Any]:
@@ -886,9 +893,25 @@ class Copilot:
     def source_changed(self, running: bool) -> None:
         """A new capture session started or the picture went away (called by the capture engine's state hook)."""
         self._tap_restart = True
+        if self.overlay is not None:
+            self.overlay.source_changed(running)
+
+    def overlay_changed(self) -> None:
+        with self._cond:
+            self._publish()
+
+    def overlay_control(self, action: str, language: str | None = None) -> dict[str, Any]:
+        if self.overlay is None:
+            raise BairdError("unavailable", "Monitor overlay is unavailable.", status=409)
+        with self._cond:
+            self.overlay.control(action, language)
+            self._publish()
+            return self.state()
 
     def close(self) -> None:
         self._closed.set()
+        if self.overlay is not None:
+            self.overlay.close()
         with self._cond:
             sess = self._session
             if sess is not None and sess.status != "stopped":

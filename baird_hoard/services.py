@@ -14,6 +14,7 @@ from .config import REPO_ROOT, Config, Settings
 from .copilot import Copilot
 from .enhance import EnhanceStage, Enhancer, StageSource
 from .hoard_link import fam_notify, family
+from .hoard_link.appconfig import env_flag
 from .hoard_link.tokens import read_or_create_token
 from .hotkeys import HotkeyHelper
 from .live import LiveRemux
@@ -21,6 +22,7 @@ from .media import Library
 from .monitor_source import MonitorSource, normalize_selection, selected_monitor
 from .native import NATIVE_DIR
 from .ocr import OcrIndex, fold
+from .overlay import CopilotOverlay, OverlayDisplay, selected_overlay_display
 from .recording_search import RecordingSearch
 from .textmap import TextReader
 from .transcribe import Transcriber
@@ -70,7 +72,19 @@ class Services:
         self.hotkeys = HotkeyHelper(config.data_dir / "hotkeys-status.json", config.port)
         self.copilot = Copilot(engine=self.engine, library=self.library, settings=self.settings, reader=TextReader(),
                                ffmpeg=self.ffmpeg, work_dir=config.work_dir)
+        self.copilot.overlay = CopilotOverlay(
+            self._overlay_display, self.copilot.overlay_changed,
+            test=(config.isolated_instance or not config.background or config.fake or config.synthetic_capture
+                  or env_flag("BAIRD_OVERLAY_TEST")),
+        )
         self.started = time.time()
+
+    def _overlay_display(self) -> OverlayDisplay | None:
+        # The source selector owns monitor identity, the topology and whether capture was explicitly enabled.
+        sources = getattr(self, "sources", None)
+        if sources is None or self.engine.snapshot()["state"] != "running":
+            return None
+        return selected_overlay_display(sources.status())
 
     def start(self) -> None:
         if self.config.background:
