@@ -86,6 +86,7 @@ class TsBuffer:
         self._pmt_pid: Optional[int] = None
         self.video_pid: Optional[int] = None
         self.audio_pid: Optional[int] = None
+        self.has_audio = False
         self.sps: Optional[bytes] = None      # profile_idc, constraint flags, level_idc
         self.bytes_total = 0
         self.last_data = 0.0
@@ -99,6 +100,7 @@ class TsBuffer:
             self._current = None
             self._pat = self._pmt = b""
             self._pmt_pid = self.video_pid = self.audio_pid = None
+            self.has_audio = False
 
     def feed(self, data: bytes) -> tuple[bytes, list[int]]:
         """Consume ``data``; returns ``(aligned, starts)``: the whole packets taken and the offsets inside them where a
@@ -139,6 +141,8 @@ class TsBuffer:
                         starts.append(off)
                     if self._current is not None:
                         self._current.frames += 1
+                elif pid == self.audio_pid and pusi and not self.has_audio:
+                    self.has_audio = _payload(pkt).startswith(b"\x00\x00\x01")
                 if self._current is not None:
                     self._current.data += pkt
                     self._current.t1 = now

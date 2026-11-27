@@ -362,7 +362,7 @@ def test_monitor_batches_small_writes_before_a_guarded_delivery(monkeypatch):
     clock = [0.0]
     monkeypatch.setattr(monitor_worker.time, "monotonic", lambda: clock[0])
     monkeypatch.setattr(monitor_worker, "TsBuffer", lambda: SimpleNamespace(
-        feed=lambda _: None, latest=lambda: (b"", 1), audio_pid=2, reset=lambda: None,
+        feed=lambda _: None, latest=lambda: (b"", 1), has_audio=True, reset=lambda: None,
     ))
     stop = threading.Event()
     captured = []

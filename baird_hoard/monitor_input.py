@@ -12,6 +12,7 @@ from contextlib import ExitStack
 
 AUDIO_RATE = 48_000
 AUDIO_DEADLINE = 1.0
+PCM_BACKLOG_BLOCKS = 24
 
 
 def _chunk(tag: bytes, content: bytes) -> bytes:
@@ -43,7 +44,7 @@ class DesktopSampler:
     """Keep the latest desktop frame independently of the PCM clock."""
 
     def __init__(self, monitor, frame_bytes, frames, gate, fps, capture_stopped):
-        self.packet = _chunk(b"00db", bytes(frame_bytes))
+        self.packet: bytes | None = None
         self.error: Exception | None = None
         self.ready = threading.Event()
         self.stop = threading.Event()
@@ -69,7 +70,7 @@ class DesktopSampler:
                         if len(picture) != frame_bytes:
                             raise ValueError("The desktop frame has an unexpected size.")
                         self.packet = _chunk(b"00db", picture)
-                    self.ready.set()
+                        self.ready.set()
                     # Slow pulls must leave room for the audio helper to acquire its own permits.
                     self.stop.wait(period if picture is None else max(0, period - (time.monotonic() - started)))
         except Exception as error:
@@ -84,6 +85,49 @@ class DesktopSampler:
         self.thread.join()
 
 
+class AudioBlocks:
+    """Drain the PCM pipe even while a video write is waiting for the encoder."""
+
+    def __init__(self, pcm, size, stop):
+        self.blocks = queue.Queue(maxsize=PCM_BACKLOG_BLOCKS)
+        self.stop = stop
+        self.error: Exception | None = None
+        self.thread = threading.Thread(target=self._read, args=(pcm, size), daemon=True,
+                                       name="baird-monitor-pcm")
+        self.thread.start()
+
+    def _read(self, pcm, size):
+        while not self.stop.is_set():
+            try:
+                data = pcm.read(size)
+            except (OSError, ValueError) as error:
+                self.error = error
+                data = b""
+            while not self.stop.is_set():
+                try:
+                    self.blocks.put(data, timeout=0.05)
+                    break
+                except queue.Full:
+                    pass
+            if len(data) != size:
+                return
+
+    @property
+    def backlog(self) -> int:
+        return self.blocks.qsize()
+
+    def read(self, size):
+        while not self.stop.is_set():
+            try:
+                data = self.blocks.get(timeout=0.05)
+                if self.error is not None:
+                    raise self.error
+                return data
+            except queue.Empty:
+                pass
+        return b""
+
+
 def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
     width, height = size
     frame_bytes = width * height * 4
@@ -94,7 +138,15 @@ def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
         while not desktop.ready.wait(0.05):
             if stop.is_set():
                 return
+        if desktop.error is not None:
+            raise desktop.error
+        if stop.is_set():
+            return
         sink.write(avi_header(width, height, fps, channels))
+        empty_video = _chunk(b"00db", b"")
+        previous = None
+        tick = 0
+        last_picture = -fps
         while not stop.is_set():
             audio = pcm.read(samples)
             if desktop.error is not None:
@@ -102,11 +154,20 @@ def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
             if stop.is_set() or len(audio) != samples:
                 return
             gate.check()
-            # The helper emits clocked, continuous PCM, including source silence.
-            # Pair every block with the last frame, even when DXGI has no update.
-            sink.write(desktop.packet)
+            # The helper emits PCM on the monotonic capture clock. Empty AVI
+            # video chunks advance its frame counter without encoding a picture.
+            picture = desktop.packet
+            age = tick - last_picture
+            if (previous is None or (getattr(pcm, "backlog", 0) < 2 and
+                                    (picture is not previous or age >= fps // 10))
+                    or age >= fps // 5):
+                sink.write(picture)
+                previous, last_picture = picture, tick
+            else:
+                sink.write(empty_video)
             sink.write(_chunk(b"01wb", audio))
             sink.flush()
+            tick += 1
     finally:
         desktop.close()
 
