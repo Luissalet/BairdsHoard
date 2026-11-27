@@ -107,6 +107,24 @@ def test_cached_metadata_refreshes_and_unknown_policy_does_not_open_input():
     assert hub.reads == 2
 
 
+def test_delayed_read_still_needs_a_fresh_lease_before_every_pull():
+    clock = [0.0]
+
+    class DelayedHub(HubDouble):
+        def read(self, monitor, layout):
+            snapshot = super().read(monitor, layout)
+            clock[0] += 0.12
+            return snapshot
+
+    hub = DelayedHub()
+    gate = AcquisitionGate(hub, choose(MONITOR, [MONITOR]), clock=lambda: clock[0])
+    assert gate.acquire("video", lambda: "first frame") == "first frame"
+    hub.change(private=True)
+    with pytest.raises(BairdError, match="Private mode"):
+        gate.acquire("video", lambda: pytest.fail("acquired under the old revision"))
+    assert hub.reads == 2
+
+
 def test_revision_cutoff_serializes_with_an_inflight_acquisition():
     hub = HubDouble()
     gate = guard(hub)

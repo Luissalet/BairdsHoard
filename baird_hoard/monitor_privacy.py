@@ -86,17 +86,15 @@ class AcquisitionGate:
             policy = self._policy
             if policy is None:
                 self._deny("policy_unavailable")
-            now = self._clock()
-            if now >= self._expires:
+            if self._clock() >= self._expires:
                 try:
                     self._current = policy.read(*self._selection)
                 except Exception:
                     self._deny("policy_unavailable")
-                self._expires = now + POLICY_TTL
+                self._expires = self._clock() + POLICY_TTL
             state = self._current
             if (not isinstance(state, PolicySnapshot) or type(state.revision) is not int
-                    or any(type(flag) is not bool for flag in (state.private, state.excluded, state.audio_excluded))
-                    or self._clock() >= self._expires):
+                    or any(type(flag) is not bool for flag in (state.private, state.excluded, state.audio_excluded))):
                 self._deny("policy_unavailable")
             if state.private:
                 self._deny("privacy_blocked")
