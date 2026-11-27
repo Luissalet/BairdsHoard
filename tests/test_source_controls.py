@@ -22,7 +22,7 @@ DISPLAY = Display("test:640x360@0,0", "Test display", 640, 360, 0, 0)
 
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
-    state = SimpleNamespace(monitors=[DISPLAY], policy=ScreenPolicy(False, ()), apps=["math.exe"], opens=[])
+    state = SimpleNamespace(monitors=[DISPLAY], policy=ScreenPolicy(False, ()), apps=["math.exe"], opens=[], callbacks=[])
     cfg = Config(data_dir=tmp_path, port=17529, data_dir_configured=True, synthetic_capture=True,
                  background=False, isolated_instance=True)
     monkeypatch.setattr("baird_hoard.capture.ensure_helper", lambda: pytest.fail("Native helper called"))
@@ -33,8 +33,13 @@ def rig(tmp_path, monkeypatch):
         state.opens.append(display.id)
         return SyntheticSource(None)
 
+    def subscribe(display_id, revoked):
+        assert display_id in {display.id for display in state.monitors}
+        state.callbacks.append(revoked)
+        return lambda: state.callbacks.remove(revoked)
+
     svc = Services(cfg, screen_backend=ScreenBackend(lambda: state.monitors, producer, lambda _: state.apps),
-                   read_screen_policy=lambda: state.policy)
+                   read_screen_policy=lambda: state.policy, subscribe_screen_policy=subscribe)
     with TestClient(create_app(cfg, svc), base_url="http://127.0.0.1:17529", client=("127.0.0.1", 50000)) as client:
         yield client, svc, state
 
@@ -115,9 +120,8 @@ def test_moved_display_needs_to_be_chosen_again(rig):
     assert state.opens == [moved.id]
 
 
-def test_privacy_cut_drops_transport_data_before_listeners(rig, monkeypatch):
+def test_privacy_cut_drops_transport_data_before_listeners(rig):
     client, svc, state = rig
-    monkeypatch.setattr("baird_hoard.screen_privacy.POLICY_REFRESH_S", 0)
     assert choose(client).status_code == 200
     assert activate(client).json()["active"]
     engine = svc.engine
@@ -235,6 +239,115 @@ def test_private_policy_blocks_the_first_local_read(rig):
         engine._proc = None
     assert reads == []
     assert svc.sources.status()["blocked"] == "private"
+
+
+@pytest.mark.parametrize(("changed_policy", "blocked"), [
+    (ScreenPolicy(True, ()), "private"),
+    (ScreenPolicy(False, ("math.exe",)), "excluded"),
+    (None, "policy_unavailable"),
+])
+def test_policy_change_between_reads_blocks_next_frame(rig, monkeypatch, changed_policy, blocked):
+    client, svc, state = rig
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine = svc.engine
+    local = engine.local_source()
+    reads, delivered = [], []
+
+    def read_frame(_):
+        reads.append(len(reads) + 1)
+        return b"frame-" + bytes([reads[-1]]) if reads[-1] <= 2 else b""
+
+    def receive(frame, *_):
+        delivered.append(frame)
+        # Change the authority after the first ready frame, in the same pump turn.
+        # No subscription callback or watchdog tick is needed to deny the next read.
+        state.policy = changed_policy
+
+    monkeypatch.setattr(engine.buffer, "feed", lambda data: (data, [0]))
+    monkeypatch.setattr(engine.buffer, "latest", lambda: (b"keyframe", 1))
+    engine.add_listener(receive)
+    proc = SimpleNamespace(stdout=SimpleNamespace(read1=read_frame))
+    engine._proc = proc
+    try:
+        engine._pump(proc, {"got_data": False}, local)
+    finally:
+        engine._proc = None
+    assert reads == [1]
+    assert delivered == [b"frame-\x01"]
+    assert svc.sources.status()["blocked"] == blocked
+    assert not svc.sources.status()["active"]
+
+
+@pytest.mark.parametrize(("reason", "blocked"), [
+    ("private", "private"), ("excluded", "excluded"), (None, "policy_unavailable"),
+])
+def test_subscription_revokes_even_during_a_policy_read(rig, monkeypatch, reason, blocked):
+    client, svc, state = rig
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine = svc.engine
+    local = engine.local_source()
+    reading, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    reads = []
+
+    def stale_policy():
+        reading.set()
+        assert release.wait(8)
+        return ScreenPolicy(False, ())
+
+    monkeypatch.setattr(local.gate, "_read_policy", stale_policy)
+    proc = SimpleNamespace(stdout=SimpleNamespace(read1=lambda _: reads.append("frame")),
+                           poll=lambda: -15 if stopped.is_set() else None, terminate=stopped.set)
+    engine._proc, engine._proc_local = proc, local
+    try:
+        with ThreadPoolExecutor(max_workers=2) as worker:
+            pending = worker.submit(engine._pump, proc, {"got_data": False}, local)
+            try:
+                assert reading.wait(5)
+                # The callback must finish before the stale positive reply is released.
+                worker.submit(state.callbacks[0], reason).result(timeout=2)
+                assert stopped.is_set() and not pending.done()
+                source = svc.sources.status()
+                assert source["blocked"] == blocked and not source["active"]
+                denied = worker.submit(call, client, svc, "screen_look", {"save": False}).result(timeout=2)
+                assert denied.status_code == 409 and denied.json()["code"] == "no_signal"
+            finally:
+                release.set()
+            pending.result(timeout=3)
+    finally:
+        engine._proc = engine._proc_local = None
+    assert reads == []
+
+
+def test_source_switch_releases_subscription_and_ignores_its_late_event(rig):
+    client, svc, state = rig
+    assert choose(client).is_success
+    assert activate(client).json()["active"]
+    old = state.callbacks[0]
+    assert choose(client, "overlay").is_success
+    assert state.callbacks == []
+    assert activate(client).json()["active"]
+    assert len(state.callbacks) == 1
+    old("private")
+    assert svc.sources.status()["active"]
+    state.callbacks[0]("excluded")
+    assert svc.sources.status()["blocked"] == "excluded"
+    assert activate(client, False).is_success
+    assert state.callbacks == []
+
+
+def test_failed_subscription_keeps_local_source_off(rig, monkeypatch):
+    client, svc, state = rig
+
+    def unavailable(*_):
+        raise ConnectionError("test Hub subscription failed")
+
+    monkeypatch.setattr(svc.sources, "_subscribe_policy", unavailable)
+    assert choose(client).is_success
+    result = activate(client)
+    assert result.status_code == 409 and result.json()["code"] == "policy_unavailable"
+    assert not svc.sources.status()["active"] and state.opens == []
 
 
 def test_picture_request_rechecks_policy_even_with_recent_data(rig, monkeypatch, ts_bytes):

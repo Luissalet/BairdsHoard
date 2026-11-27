@@ -12,7 +12,7 @@ from uuid import uuid4
 from .capture import CaptureEngine
 from .capture_source import CaptureSource
 from .errors import BairdError
-from .screen_privacy import ScreenGate, ScreenPolicy
+from .screen_privacy import ScreenGate, ScreenPolicy, ScreenPolicySubscription
 
 log = logging.getLogger("baird.sources")
 
@@ -44,11 +44,14 @@ class Selection:
 
 class SourceControls:
     def __init__(self, engine: CaptureEngine, recording_state: Callable[[], str],
-                 backend: ScreenBackend | None = None, read_policy: Callable[[], ScreenPolicy] | None = None):
+                 backend: ScreenBackend | None = None, read_policy: Callable[[], ScreenPolicy] | None = None,
+                 subscribe_policy: ScreenPolicySubscription | None = None):
         self._engine = engine
         self._recording_state = recording_state
         self._backend = backend
         self._read_policy = read_policy
+        self._subscribe_policy = subscribe_policy
+        self._unsubscribe_policy: Callable[[], None] | None = None
         self._lock = threading.RLock()
         self._selection = Selection()
         self._gate: ScreenGate | None = None
@@ -95,6 +98,7 @@ class SourceControls:
                 raise BairdError("invalid", "The capture card uses the capture setting.")
             if not active:
                 self._engine.select_local_source()
+                self._close_policy_subscription()
                 self._gate = None
                 return self.status()
             if self._engine.source_enabled():
@@ -107,12 +111,42 @@ class SourceControls:
             display = self._find(choice.monitor)
             if display is None:
                 raise BairdError("missing_display", "Choose the display again.", status=409)
-            self._gate = ScreenGate(self._read_policy, display.id, self._display_present, self._backend.visible_apps)
-            reason = self._gate.check(fresh=True)
-            if reason:
-                raise BairdError(reason, "Screen capture is blocked by the current privacy settings.", status=409)
-            self._engine.select_local_source(self._backend.producer(display), check=self._gate.check)
-            return self.status()
+            self._close_policy_subscription()
+            gate = ScreenGate(self._read_policy, display.id, self._display_present, self._backend.visible_apps)
+            self._gate = gate
+            if self._subscribe_policy is not None:
+                try:
+                    unsubscribe = self._subscribe_policy(
+                        display.id, lambda reason: self._engine.revoke_local_source(gate, reason))
+                    if not callable(unsubscribe):
+                        raise ValueError("The screen policy subscription returned no unsubscribe callback.")
+                    self._unsubscribe_policy = unsubscribe
+                except Exception:
+                    log.debug("Screen policy subscription failed", exc_info=True)
+                    gate.block(None)
+            try:
+                if gate.check() is None:
+                    self._engine.select_local_source(self._backend.producer(display), gate=gate)
+                if gate.blocked is not None:
+                    raise BairdError(gate.blocked, "Screen capture is blocked by the current privacy settings.", status=409)
+                return self.status()
+            except Exception:
+                self._close_policy_subscription()
+                raise
+
+    def close(self) -> None:
+        with self._lock:
+            if self._gate is not None:
+                self._engine.revoke_local_source(self._gate, None)
+            self._close_policy_subscription()
+
+    def _close_policy_subscription(self) -> None:
+        unsubscribe, self._unsubscribe_policy = self._unsubscribe_policy, None
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:
+                log.debug("Could not close screen policy subscription", exc_info=True)
 
     def _check_recording(self) -> None:
         if self._recording_state() in ("recording", "paused", "finishing"):
@@ -126,6 +160,7 @@ class SourceControls:
             self._engine.restore_default_source()
         else:
             self._engine.select_local_source()
+        self._close_policy_subscription()
 
     def _displays(self) -> Sequence[Display]:
         if self._backend is not None:

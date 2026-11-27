@@ -5,13 +5,16 @@ from __future__ import annotations
 import logging
 import ntpath
 import threading
-import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from typing import Literal
 
 log = logging.getLogger("baird.screen_privacy")
 
-POLICY_REFRESH_S = 0.5
+BlockReason = Literal["private", "excluded", "missing_display", "policy_unavailable"]
+BLOCK_REASONS = ("private", "excluded", "missing_display", "policy_unavailable")
+# The authority sends revocations scoped to a display. None signals unknown policy or a lost subscription.
+ScreenPolicySubscription = Callable[[str, Callable[[BlockReason | None], None]], Callable[[], None]]
 
 
 @dataclass(frozen=True)
@@ -35,21 +38,33 @@ class ScreenGate:
         self._display_present = display_present
         self._visible_apps = visible_apps
         self._lock = threading.Lock()
-        self._next_check = 0.0
-        self.blocked: str | None = None
+        self._blocked: BlockReason | None = None
 
-    def check(self, fresh: bool = False) -> str | None:
+    @property
+    def blocked(self) -> BlockReason | None:
         with self._lock:
-            if self.blocked is None and (fresh or time.monotonic() >= self._next_check):
-                try:
-                    self.blocked = self._check()
-                except Exception:
-                    log.debug("Screen policy could not be checked", exc_info=True)
-                    self.blocked = "policy_unavailable"
-                self._next_check = time.monotonic() + POLICY_REFRESH_S
-            return self.blocked
+            return self._blocked
 
-    def _check(self) -> str | None:
+    def block(self, reason: BlockReason | None) -> None:
+        with self._lock:
+            if self._blocked is None:
+                self._blocked = reason if reason in BLOCK_REASONS else "policy_unavailable"
+
+    def check(self) -> BlockReason | None:
+        blocked = self.blocked
+        if blocked is not None:
+            return blocked
+        # A revocation can set the latch even when an authority read is in progress.
+        try:
+            reason = self._check()
+        except Exception:
+            log.debug("Screen policy could not be checked", exc_info=True)
+            reason = "policy_unavailable"
+        if reason is not None:
+            self.block(reason)
+        return self.blocked
+
+    def _check(self) -> BlockReason | None:
         policy = self._read_policy()
         if (not isinstance(policy, ScreenPolicy) or type(policy.private_mode) is not bool
                 or not isinstance(policy.excluded_apps, tuple)

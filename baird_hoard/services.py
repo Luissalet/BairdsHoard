@@ -21,7 +21,7 @@ from .live import LiveRemux
 from .media import Library
 from .ocr import OcrIndex, fold
 from .recording_search import RecordingSearch
-from .screen_privacy import ScreenPolicy
+from .screen_privacy import ScreenPolicy, ScreenPolicySubscription
 from .source_controls import ScreenBackend, SourceControls
 from .textmap import TextReader
 from .transcribe import Transcriber
@@ -35,7 +35,8 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 class Services:
     def __init__(self, config: Config, *, screen_backend: ScreenBackend | None = None,
-                 read_screen_policy: Callable[[], ScreenPolicy] | None = None):
+                 read_screen_policy: Callable[[], ScreenPolicy] | None = None,
+                 subscribe_screen_policy: ScreenPolicySubscription | None = None):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -53,7 +54,7 @@ class Services:
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
         self.sources = SourceControls(self.engine, lambda: self.library.recorder.status()["state"],
-                                      screen_backend, read_screen_policy)
+                                      screen_backend, read_screen_policy, subscribe_screen_policy)
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
@@ -78,6 +79,7 @@ class Services:
             self._start_hotkeys()
 
     def stop(self) -> None:
+        self.sources.close()
         self.recordings.stop()
         self.transcriber.detail.cancel(closing=True)
         self.copilot.close()

@@ -16,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from .capture_source import CaptureSource, SyntheticSource
 from .config import Settings
+from .screen_privacy import BlockReason, ScreenGate
 from .errors import BairdError
 from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids
 from .tsbuf import TsBuffer
@@ -53,7 +54,7 @@ class _HdmiSource:
 @dataclass(frozen=True)
 class LocalSource:
     producer: CaptureSource | None = None
-    check: Callable[[bool], str | None] | None = None
+    gate: ScreenGate | None = None
 
 
 class CaptureEngine:
@@ -74,6 +75,7 @@ class CaptureEngine:
         self._lock = threading.RLock()
         self._privacy_lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
+        self._proc_local: LocalSource | None = None
         self._thread: Optional[threading.Thread] = None
         self._changed = threading.Condition(self._lock)
         self._demands: set[object] = set()
@@ -118,7 +120,7 @@ class CaptureEngine:
 
     def require_local_policy(self, local: LocalSource | None) -> None:
         """Recheck a local picture's permission before using or publishing it."""
-        allowed = self.local_source() is None if local is None else self._check_local_policy(local, fresh=True)
+        allowed = self.local_source() is None if local is None else self._check_local_policy(local)
         if not allowed:
             raise BairdError("no_signal", "The capture source is no longer available.", state="off")
 
@@ -139,24 +141,29 @@ class CaptureEngine:
             return self.settings["capture_enabled"]
 
     def select_local_source(self, producer: CaptureSource | None = None, *,
-                            check: Callable[[bool], str | None] | None = None) -> None:
-        if producer is not None and check is None:
+                            gate: ScreenGate | None = None) -> None:
+        if producer is not None and gate is None:
             raise ValueError("A local capture source requires a screen privacy check.")
-        self._select_source(LocalSource(producer, check))
+        self._select_source(LocalSource(producer, gate))
 
     def restore_default_source(self) -> None:
         self._select_source(None)
 
     def _select_source(self, local: LocalSource | None) -> None:
         with self._lock:
-            if local == self._local_source:
+            previous = self._local_source
+            if local == previous or (local is not None and local.gate is not None and local.gate.blocked is not None):
                 return
+            proc = self._proc if previous is not None and previous is self._proc_local else None
+            if previous is not None and previous.gate is not None:
+                previous.gate.block(None)
             self._local_source = local
             self._retry_at = self._limit_until = 0.0
             self._retry_step = self._fails = 0
             self.buffer.reset()
             self.state.update(state="idle", message="", device="", input=None, kbps=0, since=None, audio=False)
             self.settings_changed(reopen=True)
+        self._terminate_local_process(proc)
 
     def _wanted(self) -> bool:
         if self._local_source is not None:
@@ -364,7 +371,7 @@ class CaptureEngine:
         source = local.producer if local is not None else self._source
         if source is None:
             return False
-        if local is not None and not self._check_local_policy(local, fresh=True):
+        if local is not None and not self._check_local_policy(local):
             return False
         cmd = self._command() if local is None else source.command(self.settings)
         source_state = source.initial_state()
@@ -382,6 +389,7 @@ class CaptureEngine:
                 proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0, creationflags=NO_WINDOW)
                 self._proc = proc
+                self._proc_local = local
                 self._proc_hdmi = local is None and self._uses_hdmi_helper
         if limit:
             self._set(state="rate_limited", message="Hourly capture opening limit reached.", hint="", kbps=0, since=None)
@@ -402,7 +410,11 @@ class CaptureEngine:
         why = ""
         closing = False
         while True:
-            pump.join(0.25)
+            if local is None:
+                pump.join(0.25)
+            else:
+                self._wake.wait(0.25)
+                self._wake.clear()
             now = time.time()
             if killed_at is None:
                 with self._lock:
@@ -410,7 +422,7 @@ class CaptureEngine:
                                or (not self._wanted() and (local is not None or time.monotonic() >= self._idle_until)))
                 if not closing and local is not None:
                     # The pipe reader can block indefinitely on a silent producer.
-                    closing = not self._check_local_policy(local, fresh=True)
+                    closing = not self._check_local_policy(local)
                 if closing:
                     self._kill()
                     killed_at = now
@@ -439,6 +451,7 @@ class CaptureEngine:
             code = None
         if code is None:
             self._proc = None
+            self._proc_local = None
             if alternate:
                 self._stuck_source = proc
                 if not self._stop.is_set():
@@ -452,6 +465,7 @@ class CaptureEngine:
             return True
         err_thread.join(timeout=2)
         self._proc = None
+        self._proc_local = None
         if closing or self._restart.is_set() or self._stop.is_set():
             self.buffer.reset()
             self._set(state="idle", message="", hint="", input=None, kbps=0, since=None)
@@ -481,20 +495,41 @@ class CaptureEngine:
                 self._set(state="error", message=f"The capture helper stopped (code {code}).", kbps=0, since=None)
         return True
 
-    def _check_local_policy(self, local: LocalSource, *, fresh: bool) -> bool:
+    def revoke_local_source(self, gate: ScreenGate, reason: BlockReason | None) -> None:
+        """Latch a cutoff and wake the supervisor even if a pipe or policy read is stalled."""
+        with self._changed:
+            gate.block(reason)
+            local = self._local_source
+            if local is None or local.gate is not gate:
+                return
+            proc = self._proc if self._proc_local is local else None
+            self._local_source = LocalSource()
+            self.buffer.reset()
+            self.state.update(state="off", message="Screen capture is off.", device="", input=None,
+                              kbps=0, since=None, audio=False)
+            self._restart.set()
+            self._wake.set()
+            self._changed.notify_all()
+        self._terminate_local_process(proc)
+
+    @staticmethod
+    def _terminate_local_process(proc: subprocess.Popen | None) -> None:
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.terminate()
+            except OSError:
+                log.debug("The supervisor will close the revoked capture process.", exc_info=True)
+
+    def _check_local_policy(self, local: LocalSource) -> bool:
+        gate = local.gate
+        if gate is None or self.local_source() is not local:
+            return False
         with self._privacy_lock:
-            if local.check is None or self.local_source() is not local:
+            if self.local_source() is not local:
                 return False
-            if local.check(fresh):
-                with self._changed:
-                    if self._local_source is local:
-                        self._local_source = LocalSource()
-                        self.buffer.reset()
-                        self.state.update(state="off", message="Screen capture is off.", device="", input=None,
-                                          kbps=0, since=None, audio=False)
-                        self._restart.set()
-                        self._wake.set()
-                        self._changed.notify_all()
+            reason = gate.check()
+            if reason is not None:
+                self.revoke_local_source(gate, reason)
                 return False
             return self.local_source() is local
 
@@ -506,12 +541,12 @@ class CaptureEngine:
         ready = False
         try:
             while True:
-                if local is not None and not self._check_local_policy(local, fresh=not ready):
+                if local is not None and not self._check_local_policy(local):
                     break
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 if not chunk:
                     break
-                if local is not None and not self._check_local_policy(local, fresh=False):
+                if local is not None and not self._check_local_policy(local):
                     break
                 with self._lock:
                     if self._proc is not proc or local is not self._local_source:
@@ -531,12 +566,17 @@ class CaptureEngine:
                 with self._lock:
                     listeners = list(self._listeners)
                 for fn in listeners:
+                    if local is not None and self.local_source() is not local:
+                        break
                     try:
                         fn(aligned, starts, end_total)
                     except Exception:  # noqa: BLE001
                         log.exception("capture listener failed")
         except (OSError, ValueError):
             log.debug("capture pipe closed", exc_info=True)
+        finally:
+            if local is not None:
+                self._wake.set()
 
     def _read_events(self, proc: subprocess.Popen) -> None:
         err = proc.stderr
