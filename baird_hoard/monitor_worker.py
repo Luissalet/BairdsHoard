@@ -16,6 +16,8 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .errors import BairdError
+from .monitor_input import AudioGrants, feed_samples
+from .monitor_privacy import AcquisitionGate, BLOCK_CODES, CapturePolicy
 from .monitor_source import DesktopMonitor, RESELECT, normalize_selection, selected_monitor, windows_inventory
 from .native import NATIVE_DIR, NO_WINDOW, bind_to_app, csc_path
 from .tsbuf import TsBuffer
@@ -49,22 +51,15 @@ def available_encoders(ffmpeg: str) -> set[str]:
 
 
 def video_graph(monitor: DesktopMonitor, encoder: str) -> str:
-    source = f"ddagrab=output_idx={monitor.output}:framerate={FPS}:dup_frames=1"
     rotations = {2: "transpose=clock", 3: "hflip,vflip", 4: "transpose=cclock"}
-    rotate = rotations.get(monitor.rotation)
-    convert = encoder in (SOFTWARE, "h264_qsv") or rotate is not None
-    filters = [source, "setpts=PTS-STARTPTS"]
-    if convert:
-        filters.extend(("hwdownload", "format=bgra"))
-        if rotate:
-            filters.append(rotate)
-        filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
-        if encoder == SOFTWARE:
-            filters.append("format=yuv420p")
-        elif encoder == "h264_qsv":
-            filters.extend(("format=nv12", "hwupload=extra_hw_frames=16:derive_device=qsv"))
-        else:
-            filters.extend(("format=bgra", "hwupload=extra_hw_frames=16"))
+    filters = ["[0:v]setpts=PTS-STARTPTS"]
+    if monitor.rotation in rotations:
+        filters.append(rotations[monitor.rotation])
+    filters.append("pad=ceil(iw/2)*2:ceil(ih/2)*2")
+    if encoder == SOFTWARE:
+        filters.append("format=yuv420p")
+    else:
+        filters.extend(("format=nv12", "hwupload=extra_hw_frames=16"))
     return ",".join(filters) + "[desktop]"
 
 
@@ -79,9 +74,13 @@ def ffmpeg_command(ffmpeg: str, monitor: DesktopMonitor, encoder: str, microphon
     else:
         audio = ["-map", "0:a:0"]
     args = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-filter_complex_threads", "1"]
-    if device:
-        args += ["-init_hw_device", f"d3d11va=display:{monitor.adapter}", "-filter_hw_device", "display"]
-    args += ["-f", "s16le", "-ar", "48000", "-ac", "4" if microphone else "2", "-i", "pipe:0",
+    if device and encoder != SOFTWARE:
+        args += ["-init_hw_device", f"d3d11va=display:{monitor.adapter}"]
+        if encoder == "h264_qsv":
+            args += ["-init_hw_device", "qsv=encoder@display"]
+        args += ["-filter_hw_device", "encoder" if encoder == "h264_qsv" else "display"]
+    inputs = ["-f", "avi"] if video is None else ["-f", "s16le", "-ar", "48000", "-ac", "4" if microphone else "2"]
+    args += [*inputs, "-i", "pipe:0",
              "-filter_complex", graph, "-map", "[desktop]", *audio,
              "-r", str(FPS), "-c:v", encoder, "-g", str(FPS), "-bf", "0"]
     if encoder == SOFTWARE:
@@ -148,26 +147,30 @@ def _drain(lines: BinaryIO, tail: deque, levels: dict | None = None):
 
 
 class EncoderAttempt:
-    def __init__(self, audio, video):
+    def __init__(self, audio, video, grants=None):
         self.audio = audio
         self.video = video
         self.stop = threading.Event()
         self.chunks = queue.Queue(maxsize=8)
         self.audio_errors = deque(maxlen=4)
         self.video_errors = deque(maxlen=4)
-        self.levels = {}
+        self.grants = grants
+        self.feed_error: Exception | None = None
+        self.levels = grants.levels if grants is not None else {}
         self.readers = [
             threading.Thread(target=self._read, daemon=True),
-            threading.Thread(target=_drain, args=(audio.stderr, self.audio_errors, self.levels), daemon=True),
             threading.Thread(target=_drain, args=(video.stderr, self.video_errors), daemon=True),
         ]
+        if grants is None:
+            self.readers.append(threading.Thread(target=_drain, args=(audio.stderr, self.audio_errors, self.levels), daemon=True))
         for reader in self.readers:
             reader.start()
 
     def _read(self):
         try:
             while not self.stop.is_set():
-                chunk = self.video.stdout.read(32768)
+                read = getattr(self.video.stdout, "read1", self.video.stdout.read)
+                chunk = read(32768)
                 while not self.stop.is_set():
                     try:
                         self.chunks.put(chunk, timeout=0.2)
@@ -180,6 +183,12 @@ class EncoderAttempt:
             return
 
     def chunk(self, timeout: float) -> bytes | None:
+        if self.grants is not None:
+            self.grants.gate.check()
+            if self.grants.failure is not None:
+                raise self.grants.failure
+        if self.feed_error is not None:
+            raise self.feed_error
         if self.audio.poll() not in (None, 0):
             raise RuntimeError("System audio capture stopped. " + " ".join(self.audio_errors))
         try:
@@ -202,6 +211,23 @@ class EncoderAttempt:
         self.video.stdout.close()
         self.video.stderr.close()
         self.audio.stderr.close()
+
+    def start_feeder(self, monitor, frames, dimensions, gate, microphone):
+        def feed():
+            try:
+                with self.video.stdin:
+                    feed_samples(self.video.stdin, self.audio.stdout, monitor, dimensions, frames, gate, self.stop,
+                                 FPS, 4 if microphone else 2)
+            except BrokenPipeError:
+                pass  # The encoder stopped accepting input.
+            except Exception as error:
+                self.feed_error = error
+            finally:
+                self.audio.stdout.close()
+
+        thread = threading.Thread(target=feed, daemon=True)
+        self.readers.append(thread)
+        thread.start()
 
 
 @contextmanager
@@ -226,12 +252,39 @@ def open_encoder(audio_command: list[str], command: list[str]):
         session.close()
 
 
+@contextmanager
+def open_guarded_encoder(audio_command, command, monitor, frames, dimensions, gate, microphone):
+    gate.preflight()
+    audio = subprocess.Popen(audio_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, creationflags=NO_WINDOW)
+    bind_to_app(audio)
+    try:
+        video = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 creationflags=NO_WINDOW)
+    except BaseException:
+        _terminate(audio)
+        audio.stdin.close()
+        audio.stdout.close()
+        audio.stderr.close()
+        raise
+    bind_to_app(video)
+    grants = AudioGrants(audio, gate)
+    session = EncoderAttempt(audio, video, grants)
+    try:
+        session.start_feeder(monitor, frames, dimensions, gate, microphone)
+        yield session
+    finally:
+        session.close()
+        for thread in grants.threads:
+            thread.join(timeout=0.5)
+
+
 def _same_output(expected: DesktopMonitor, resolve) -> None:
     if resolve() != expected:
         raise BairdError("monitor_reselect", RESELECT, status=409)
 
 
-def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop, sink, event) -> None:
+def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop, sink, event, gate=None) -> None:
     # Keep failed hardware attempts private. A retry starts an entirely new stream.
     pending = bytearray()
     initial = TsBuffer()
@@ -239,7 +292,11 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
     now = time.monotonic()
     deadline, next_check, next_stats, bytes_sent = now + START_TIMEOUT_S, now + LAYOUT_POLL_S, now + 1.0, 0
     while not stop.is_set():
+        if gate is not None:
+            gate.preflight()
         chunk = session.chunk(0.15)
+        if gate is not None:
+            gate.preflight()
         now = time.monotonic()
         if now >= next_check:
             _same_output(monitor, resolve)
@@ -275,7 +332,7 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
             raise EncoderStartError(session.failure())
 
 
-def run_capture(resolve, available, open_attempt, microphone, stop, sink, event=emit):
+def run_capture(resolve, available, open_attempt, microphone, stop, sink, event=emit, *, gate=None):
     monitor = resolve()
     encoders = encoder_order(monitor, available)
     for encoder in encoders:
@@ -284,7 +341,7 @@ def run_capture(resolve, available, open_attempt, microphone, stop, sink, event=
         _same_output(monitor, resolve)
         try:
             with open_attempt(monitor, encoder, microphone) as session:
-                stream_attempt(session, monitor, encoder, resolve, stop, sink, event)
+                stream_attempt(session, monitor, encoder, resolve, stop, sink, event, gate)
             return
         except EncoderStartError as exc:
             if encoder == SOFTWARE:
@@ -300,7 +357,7 @@ def _listen_for_quit(stop):
             return
 
 
-def main() -> int:
+def main(policy: CapturePolicy | None = None, *, frames=None, audio_command=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--ffmpeg", required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
@@ -316,17 +373,26 @@ def main() -> int:
             return selected_monitor(selected, windows_inventory())
 
         resolve()
-        audio = [str(audio_helper(args.work_dir))]
-        if args.microphone:
-            audio.append("--microphone")
+        gate = AcquisitionGate(policy, selected, on_block=lambda error: emit(
+            "error", code=error.code, message=error.message,
+        ))
+        gate.preflight()
+        from .monitor_windows import desktop_frames, frame_size
+
+        source_frames = desktop_frames if frames is None else frames
+        audio = audio_command(args.microphone) if audio_command is not None else (
+            [str(audio_helper(args.work_dir))] + (["--microphone"] if args.microphone else [])
+        )
 
         def open_attempt(monitor, encoder, microphone):
-            return open_encoder(audio, ffmpeg_command(args.ffmpeg, monitor, encoder, microphone))
+            command = ffmpeg_command(args.ffmpeg, monitor, encoder, microphone)
+            return open_guarded_encoder(audio, command, monitor, source_frames, frame_size(monitor), gate, microphone)
 
-        run_capture(resolve, available_encoders(args.ffmpeg), open_attempt, args.microphone, stop, sys.stdout.buffer)
+        run_capture(resolve, available_encoders(args.ffmpeg), open_attempt, args.microphone, stop, sys.stdout.buffer, gate=gate)
         return 0
     except BairdError as exc:
-        emit("error", code=exc.code, message=exc.message)
+        if exc.code not in BLOCK_CODES:  # The gate reports once, before its worker closes.
+            emit("error", code=exc.code, message=exc.message)
     except BrokenPipeError:
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:

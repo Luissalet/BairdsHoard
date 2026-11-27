@@ -9,13 +9,14 @@ import sqlite3
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .capture_source import CaptureSource, SyntheticSource
 from .config import Settings
 from .errors import BairdError
+from .monitor_privacy import BLOCK_CODES
 from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids
 from .tsbuf import TsBuffer
 
@@ -61,6 +62,7 @@ class CaptureEngine:
         self._demand_only = demand_only
         self._graceful_stop = self._uses_hdmi_helper or graceful_stop
         self._needs_selection = False
+        self._privacy_block: tuple[str, str] | None = None
         self._source: CaptureSource = source if source is not None else (
             SyntheticSource(ffmpeg, video=fake_source, marked=False) if fake else _HdmiSource()
         )
@@ -110,7 +112,7 @@ class CaptureEngine:
             self._thread.start()
 
     def _wanted(self) -> bool:
-        return (self.settings["capture_enabled"] and not self._needs_selection
+        return (self.settings["capture_enabled"] and not self._needs_selection and self._privacy_block is None
                 and bool(self._demands or (not self._demand_only and self.settings["capture_always_on"])))
 
     def set_demand(self, source: object, active: bool) -> None:
@@ -153,6 +155,9 @@ class CaptureEngine:
                     self._needs_selection = False
                     self._retry_at = 0.0
                     self._retry_step = 0
+            if self._privacy_block is not None and not self.settings["capture_enabled"]:
+                self._privacy_block = None
+                self.state.update(state="idle", message="", privacy=None)
             if self._wanted():
                 self._start()
             else:
@@ -177,6 +182,9 @@ class CaptureEngine:
             out["retry_in_s"] = round(max(0.0, max(self._retry_at, self._limit_until) - time.monotonic()), 1)
             if not self.settings["capture_enabled"]:
                 out.update(state="off", message="Capture is off.")
+            elif self._privacy_block is not None:
+                code, message = self._privacy_block
+                out.update(state="privacy_blocked", privacy=code, message=message, input=None, kbps=0, audio=False)
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
@@ -200,6 +208,9 @@ class CaptureEngine:
         st = self.snapshot()
         if st["state"] == "reselect":
             raise BairdError("monitor_reselect", st["message"], status=409)
+        if st["state"] == "privacy_blocked":
+            code = st["privacy"]
+            raise BairdError(code, st["message"], status=503 if code == "policy_unavailable" else 409)
         if st["state"] != "running" or st["age_s"] is None or st["age_s"] > 3:
             hint = {"off": "Turn capture on.", "no_device": "Plug in the capture device (AVerMedia GL310).",
                     "stuck": STUCK_HINT,
@@ -211,6 +222,8 @@ class CaptureEngine:
 
     def _set(self, **changes: Any) -> None:
         with self._changed:
+            if self._privacy_block is not None and changes.get("state") in ("starting", "running"):
+                return
             self.state.update(changes)
             snap = dict(self.state)
             self._changed.notify_all()
@@ -248,6 +261,16 @@ class CaptureEngine:
             self._needs_selection = True
         self.buffer.reset()
         self._set(state="reselect", message=message, input=None, kbps=0, audio=False, since=None,
+                  audio_level=0.0, microphone_level=None)
+
+    def _block_for_privacy(self, proc, code: str, message: str) -> None:
+        with self._lock:
+            if (self._proc is not proc or self._restart.is_set() or self._privacy_block is not None
+                    or not self.settings["capture_enabled"]):
+                return
+            self._privacy_block = code, message
+            self.buffer.reset()
+        self._set(state="privacy_blocked", privacy=code, message=message, input=None, kbps=0, audio=False, since=None,
                   audio_level=0.0, microphone_level=None)
 
     def _go_stuck(self, why: str) -> None:
@@ -399,6 +422,8 @@ class CaptureEngine:
             return True
         err_thread.join(timeout=2)
         self._proc = None
+        if self._privacy_block is not None:
+            return True
         if closing or self._restart.is_set() or self._stop.is_set():
             self.buffer.reset()
             self._set(state="idle", message="", hint="", input=None, kbps=0, since=None)
@@ -444,7 +469,10 @@ class CaptureEngine:
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 if not chunk or self._proc is not proc:
                     break
-                aligned, starts = self.buffer.feed(chunk)
+                with self._lock if self._demand_only else nullcontext():
+                    if self._privacy_block is not None:
+                        continue
+                    aligned, starts = self.buffer.feed(chunk)
                 if not aligned:
                     continue
                 end_total = self.buffer.bytes_total
@@ -463,6 +491,8 @@ class CaptureEngine:
                         self._retry_at = 0.0
                     self._set(state="running", message="", hint="", since=time.time())
                 with self._lock:
+                    if self._privacy_block is not None:
+                        continue
                     listeners = list(self._listeners)
                 for fn in listeners:
                     try:
@@ -500,6 +530,8 @@ class CaptureEngine:
                 message = str(evt.get("message", ""))[:300]
                 if self._proc is proc:
                     self._fatal = (code, message, time.time())
+                    if self._demand_only and code in BLOCK_CODES:
+                        self._block_for_privacy(proc, code, message)
                 log.warning("capture helper: %s", line[:400])
             elif kind == "warning":
                 log.warning("capture helper: %s", line[:400])

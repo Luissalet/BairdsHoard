@@ -121,6 +121,8 @@ class Services:
         state = snap.get("state", "")
         previous, self._last_state = self._last_state, state
         self.library.recorder.on_capture_state(state)
+        if state == "privacy_blocked":
+            self.library.recorder.source_changed()
         self.stage.raw_state(state == "running")
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")

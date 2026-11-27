@@ -67,11 +67,14 @@ def test_hardware_selection_respects_display_adapter_and_mic_is_optional():
     assert encoder_order(MONITOR, {"h264_qsv", SOFTWARE}) == [SOFTWARE]
     options = ffmpeg_command("ffmpeg", MONITOR, "h264_nvenc", False)
     assert "d3d11va=display:2" in options and "-forced-idr" in options
-    assert "ddagrab=output_idx=0:" in options[options.index("-filter_complex") + 1]
+    assert options[options.index("-i") - 1] == "avi"
+    assert options[options.index("-i") + 1] == "pipe:0"
+    assert "hwupload" in options[options.index("-filter_complex") + 1]
+    assert all("ddagrab" not in option for option in options)
     assert "pan=" not in options[options.index("-filter_complex") + 1]
     opts_with_mic = ffmpeg_command("ffmpeg", SECOND, "h264_qsv", True)
     filters = opts_with_mic[opts_with_mic.index("-filter_complex") + 1]
-    assert "derive_device=qsv" in filters and "c0=c2|c1=c3[mic]" in filters
+    assert "qsv=encoder@display" in opts_with_mic and "c0=c2|c1=c3[mic]" in filters
     assert "-forced_idr" in opts_with_mic
 
 

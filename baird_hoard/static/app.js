@@ -224,6 +224,7 @@ async function refreshStatus() {
   const s = cap.state || 'off';
   const monitor = cap.source === 'monitor';
   let text = s === 'reselect' ? captureText('Elige monitor', 'Choose a monitor') : STATE_TEXT[s] || s;
+  if (s === 'privacy_blocked') text = captureText('Captura privada', 'Capture blocked by privacy');
   if (s === 'running' && cap.input) text += ` · ${cap.input.width}×${cap.input.height}`;
   setChip(s, text);
   $('meta').textContent = s === 'running'
@@ -233,6 +234,14 @@ async function refreshStatus() {
     starting: [captureText('Abriendo el monitor…', 'Opening the monitor…'), ''],
     reselect: [captureText('Elige un monitor', 'Choose a monitor'),
       captureText('Vuelve a elegir la pantalla para abrir la imagen.', 'Select the display again to open the picture.')],
+    privacy_blocked: [
+      captureText('Captura detenida por privacidad', 'Capture stopped by privacy'),
+      {
+        privacy_blocked: captureText('El modo privado está activo.', 'Private mode is active.'),
+        application_excluded: captureText('Hay una exclusión de privacidad activa.', 'A privacy exclusion is active.'),
+        policy_unavailable: captureText('No se ha podido comprobar la política de privacidad.', 'Screen privacy could not be confirmed.'),
+      }[cap.privacy] || '',
+    ],
     error: [captureText('No se pudo abrir el monitor', 'Could not open the monitor'), ''],
   };
   const msg = monitor && monitorHints[s] || STATE_HINT[s];

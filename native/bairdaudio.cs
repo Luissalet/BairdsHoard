@@ -109,7 +109,7 @@ sealed class CapturedAudio : IDisposable
         started = true;
     }
 
-    public void Drain(long epoch, long now, long emitted)
+    public void Drain(long epoch, long now, long emitted, AcquisitionPermit permit)
     {
         uint size;
         while (true)
@@ -117,32 +117,38 @@ sealed class CapturedAudio : IDisposable
             Check(capture.GetNextPacketSize(out size));
             if (size == 0)
                 return;
-            IntPtr data;
-            uint frames, flags;
-            ulong position, qpc;
-            int result = capture.GetBuffer(out data, out frames, out flags, out position, out qpc);
-            Check(result);
-            if (frames == 0)
-                return;
+            permit.Begin();
             try
             {
-                long beginning = (flags & TimestampError) == 0
-                    ? ((long)qpc - epoch) * Rate / 10000000
-                    : Math.Max(lastEnd, now - frames);
-                // Small device-clock differences do not open a gap between adjacent packets.
-                if (lastEnd != long.MinValue && Math.Abs(beginning - lastEnd) < 24)
-                    beginning = lastEnd;
-                lastEnd = beginning + frames;
-                if (lastEnd > emitted && (flags & Silent) == 0 && data != IntPtr.Zero)
+                IntPtr data;
+                uint frames, flags;
+                ulong position, qpc;
+                Check(capture.GetBuffer(out data, out frames, out flags, out position, out qpc));
+                if (frames == 0)
+                    return;
+                try
                 {
-                    var samples = new short[checked((int)frames * 2)];
-                    Marshal.Copy(data, samples, 0, samples.Length);
-                    packets.Enqueue(new Packet { Start = beginning, Samples = samples });
+                    long beginning = (flags & TimestampError) == 0
+                        ? ((long)qpc - epoch) * Rate / 10000000
+                        : Math.Max(lastEnd, now - frames);
+                    if (lastEnd != long.MinValue && Math.Abs(beginning - lastEnd) < 24)
+                        beginning = lastEnd;
+                    lastEnd = beginning + frames;
+                    if (lastEnd > emitted && (flags & Silent) == 0 && data != IntPtr.Zero)
+                    {
+                        var samples = new short[checked((int)frames * 2)];
+                        Marshal.Copy(data, samples, 0, samples.Length);
+                        packets.Enqueue(new Packet { Start = beginning, Samples = samples });
+                    }
+                }
+                finally
+                {
+                    Check(capture.ReleaseBuffer(frames));
                 }
             }
             finally
             {
-                Check(capture.ReleaseBuffer(frames));
+                permit.End();
             }
         }
     }
@@ -196,6 +202,23 @@ sealed class CapturedAudio : IDisposable
     }
 }
 
+sealed class AcquisitionPermit
+{
+    readonly Stream input = Console.OpenStandardInput();
+
+    public void Begin()
+    {
+        Console.Error.WriteLine("@acquire");
+        if (input.ReadByte() != '1')
+            throw new IOException("Audio capture permission ended.");
+    }
+
+    public void End()
+    {
+        Console.Error.WriteLine("@complete");
+    }
+}
+
 static class BairdAudio
 {
     const int Rate = 48000, Block = 480;
@@ -213,20 +236,18 @@ static class BairdAudio
         return (value / 32768.0).ToString("0.0000", CultureInfo.InvariantCulture);
     }
 
-    static void Run(CapturedAudio loop, CapturedAudio mic, Stream sink)
+    static void Run(CapturedAudio loop, CapturedAudio mic, Stream sink, AcquisitionPermit permit, long epoch)
     {
         int channels = mic == null ? 2 : 4;
         var samples = new short[Block * channels];
         var bytes = new byte[samples.Length * 2];
-        long epoch = Clock100ns(), emitted = 0, lastReport = 0;
+        long emitted = 0, lastReport = 0;
         int peak = 0, micPeak = 0;
-        loop.Start();
-        if (mic != null) mic.Start();
         while (true)
         {
             long now = (Clock100ns() - epoch) * Rate / 10000000;
-            loop.Drain(epoch, now, emitted);
-            if (mic != null) mic.Drain(epoch, now, emitted);
+            loop.Drain(epoch, now, emitted, permit);
+            if (mic != null) mic.Drain(epoch, now, emitted, permit);
             while (emitted + Block <= now - JitterBuffer)
             {
                 Array.Clear(samples, 0, samples.Length);
@@ -255,13 +276,24 @@ static class BairdAudio
         if (args.Length != 0 && !microphone)
             return 2;
         IMMDeviceEnumerator devices = null;
+        CapturedAudio system = null, mic = null;
         try
         {
-            devices = (IMMDeviceEnumerator)new MMDeviceEnumerator();
-            using (var system = new CapturedAudio(devices, true))
-            using (var mic = microphone ? new CapturedAudio(devices, false) : null)
+            var permit = new AcquisitionPermit();
+            permit.Begin();
+            long epoch;
+            try
+            {
+                devices = (IMMDeviceEnumerator)new MMDeviceEnumerator();
+                system = new CapturedAudio(devices, true);
+                mic = microphone ? new CapturedAudio(devices, false) : null;
+                epoch = Clock100ns();
+                system.Start();
+                if (mic != null) mic.Start();
+            }
+            finally { permit.End(); }
             using (var sink = Console.OpenStandardOutput())
-                Run(system, mic, sink);
+                Run(system, mic, sink, permit, epoch);
             return 0;
         }
         catch (IOException) { return 0; }  // The encoder closed the PCM pipe.
@@ -270,6 +302,11 @@ static class BairdAudio
             Console.Error.WriteLine("WASAPI capture failed: " + error.Message.Replace('\r', ' ').Replace('\n', ' '));
             return 1;
         }
-        finally { CapturedAudio.Release(devices); }
+        finally
+        {
+            if (mic != null) mic.Dispose();
+            if (system != null) system.Dispose();
+            CapturedAudio.Release(devices);
+        }
     }
 }
