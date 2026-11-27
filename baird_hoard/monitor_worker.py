@@ -97,7 +97,7 @@ def ffmpeg_command(ffmpeg: str, monitor: DesktopMonitor, encoder: str, microphon
         else:
             args += ["-forced_idr", "1", "-async_depth", "1", "-adaptive_i", "0"]
     return [*args, "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-            "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0",
+            "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
             "-f", "mpegts", "pipe:1"]
 
 
