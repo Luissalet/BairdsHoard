@@ -17,7 +17,7 @@ from .services import Services
 
 AGENT_INSTRUCTIONS = """Baird's Hoard shows what another computer puts on the HDMI capture device plugged into this PC (an AVerMedia Live Gamer Portable Lite) and keeps the last minutes in memory.
 screen_look returns the current picture of the other computer as an image (and saves it as a screenshot); use it to see what the user is looking at on that device. capture_status says whether there is a picture (state running), the input resolution and how many seconds are kept; state stuck means the device stopped responding and the user has to unplug and replug its USB cable (say so).
-clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_stop record until stopped. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
+clip_save saves the last N seconds as an MP4 (instant, no re-encoding). record_start / record_pause / record_resume / record_stop control the recording. media_list lists the screenshots, clips and recordings (newest first) with their paths; media_look shows a saved screenshot or a frame of a video. media_light_copy makes a smaller copy of a video for chats with upload limits. media_copy puts a file on the Windows clipboard so the user can paste it; media_reveal shows it in Explorer. media_delete sends a file to the Recycle Bin (confirm=true).
 snapshot_save and screen_look accept a region (a rectangle in pixels of the input picture, or fractions 0..1) to save or look at only that part. media_search finds visible text in screenshots, recordings and saved reports and returns timestamped excerpts; media_ocr reads one now. send_to_faustus opens a Faustus chat with a file attached to its message box and returns the chat's url.
 watch_add makes a rule that watches a zone and alerts the person (through the Hub's notifications) when it changes, when a changing zone goes still (a long process ended) or when a text appears or disappears; watch_list / watch_events show rules and alerts. hotkeys_status reports the global shortcuts.
 enhance_set turns the GPU enhancement on and chooses the effects (denoise, upscale, sharpen, interpolate, hdr): the live view, clips and recordings then use the enhanced picture (screen_look and screenshots stay the original). enhance_status shows what it does now and what each effect costs per frame; enhance_benchmark measures that cost on a sample; media_enhance writes an enhanced copy of a saved video.
@@ -200,6 +200,10 @@ class CopilotShowArgs(BaseModel):
     space: Optional[list[float]] = Field(None, min_length=2, max_length=2, description="[width, height] your coordinates are measured on, when it is not your last look.")
 
 
+class RecordingTargetArgs(BaseModel):
+    target: Optional[str] = Field(None, max_length=255, description="Restrict the action to the named active recording.")
+
+
 class CopilotWaitArgs(BaseModel):
     wait_s: float = Field(45, ge=0, le=150, description="Longest wait in seconds.")
     look: Literal["auto", "always", "never"] = "auto"
@@ -344,6 +348,10 @@ TOOLS: list[Tool] = [
          ClipArgs, ann(draft_safe=True), lambda s, a: s.library.clip(a.seconds), timeout_s=120),
     Tool("record_start", _d("Start recording the other computer (picture and sound) until record_stop.", synonyms="grabar"),
          Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.start()),
+    Tool("record_pause", _d("Pause recording. Resume with record_resume for the same target.", synonyms="pausar grabación"),
+         RecordingTargetArgs, ann(idempotent=True), lambda s, a: s.library.recorder.pause(target=a.target)),
+    Tool("record_resume", _d("Resume the paused recording. Use record_pause to pause again.", synonyms="reanudar grabación"),
+         RecordingTargetArgs, ann(idempotent=True), lambda s, a: s.library.recorder.resume(target=a.target), timeout_s=30),
     Tool("record_stop", _d("Stop the recording; the MP4 appears in the library a moment later.", synonyms="parar grabación"),
          Empty, ann(draft_safe=True), lambda s, a: s.library.recorder.stop()),
     Tool("transcribe_start", _d("Record the screen and transcribe the document locally while it scrolls. Optionally select its region."),

@@ -9,13 +9,14 @@ import sqlite3
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .capture_source import CaptureSource, SyntheticSource
 from .config import Settings
 from .errors import BairdError
+from .monitor_privacy import BLOCK_CODES
 from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids
 from .tsbuf import TsBuffer
 
@@ -52,14 +53,20 @@ class _HdmiSource:
 class CaptureEngine:
     def __init__(self, settings: Settings, buffer: TsBuffer, *, ffmpeg: Optional[str] = None, fake: bool = False,
                  on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = "",
-                 source: CaptureSource | None = None):
+                 source: CaptureSource | None = None, demand_only: bool = False, graceful_stop: bool = False,
+                 source_cwd: Path = NATIVE_DIR):
         self.settings = settings
         self.buffer = buffer
         self._alternate_source = source is not None
         self._uses_hdmi_helper = source is None and not fake
+        self._demand_only = demand_only
+        self._graceful_stop = self._uses_hdmi_helper or graceful_stop
+        self._needs_selection = False
+        self._privacy_block: tuple[str, str] | None = None
         self._source: CaptureSource = source if source is not None else (
             SyntheticSource(ffmpeg, video=fake_source, marked=False) if fake else _HdmiSource()
         )
+        self._source_cwd = source_cwd
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
@@ -83,6 +90,8 @@ class CaptureEngine:
         self._stuck_source: Optional[subprocess.Popen] = None
         self.state: dict[str, Any] = {"state": "idle", "message": "", "device": "", "encoder": "", "input": None,
                                       "kbps": 0, "since": None, "restarts": 0, "audio": False, "hint": ""}
+        if self._demand_only:
+            self.state.update(self._source.initial_state())
 
     # ------------------------------------------------------------------ listeners
 
@@ -103,7 +112,8 @@ class CaptureEngine:
             self._thread.start()
 
     def _wanted(self) -> bool:
-        return self.settings["capture_enabled"] and bool(self._demands or self.settings["capture_always_on"])
+        return (self.settings["capture_enabled"] and not self._needs_selection and self._privacy_block is None
+                and bool(self._demands or (not self._demand_only and self.settings["capture_always_on"])))
 
     def set_demand(self, source: object, active: bool) -> None:
         with self._lock:
@@ -138,8 +148,16 @@ class CaptureEngine:
 
     def settings_changed(self, reopen: bool = False) -> None:
         with self._lock:
-            if reopen and (self._opening or self._proc is not None):
-                self._restart.set()
+            if reopen:
+                if self._opening or self._proc is not None:
+                    self._restart.set()
+                if self._demand_only:
+                    self._needs_selection = False
+                    self._retry_at = 0.0
+                    self._retry_step = 0
+            if self._privacy_block is not None and not self.settings["capture_enabled"]:
+                self._privacy_block = None
+                self.state.update(state="idle", message="", privacy=None)
             if self._wanted():
                 self._start()
             else:
@@ -164,6 +182,9 @@ class CaptureEngine:
             out["retry_in_s"] = round(max(0.0, max(self._retry_at, self._limit_until) - time.monotonic()), 1)
             if not self.settings["capture_enabled"]:
                 out.update(state="off", message="Capture is off.")
+            elif self._privacy_block is not None:
+                code, message = self._privacy_block
+                out.update(state="privacy_blocked", privacy=code, message=message, input=None, kbps=0, audio=False)
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
@@ -185,6 +206,11 @@ class CaptureEngine:
 
     def require_picture(self) -> None:
         st = self.snapshot()
+        if st["state"] == "reselect":
+            raise BairdError("monitor_reselect", st["message"], status=409)
+        if st["state"] == "privacy_blocked":
+            code = st["privacy"]
+            raise BairdError(code, st["message"], status=503 if code == "policy_unavailable" else 409)
         if st["state"] != "running" or st["age_s"] is None or st["age_s"] > 3:
             hint = {"off": "Turn capture on.", "no_device": "Plug in the capture device (AVerMedia GL310).",
                     "stuck": STUCK_HINT,
@@ -196,6 +222,8 @@ class CaptureEngine:
 
     def _set(self, **changes: Any) -> None:
         with self._changed:
+            if self._privacy_block is not None and changes.get("state") in ("starting", "running"):
+                return
             self.state.update(changes)
             snap = dict(self.state)
             self._changed.notify_all()
@@ -209,7 +237,7 @@ class CaptureEngine:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return
-        if not self._uses_hdmi_helper:
+        if not self._graceful_stop:
             proc.terminate()
             return
         try:
@@ -225,6 +253,25 @@ class CaptureEngine:
 
     def _command(self) -> list[str]:
         return self._source.command(self.settings)
+
+    def _block_for_selection(self, message: str) -> None:
+        with self._lock:
+            if self._restart.is_set():
+                return
+            self._needs_selection = True
+        self.buffer.reset()
+        self._set(state="reselect", message=message, input=None, kbps=0, audio=False, since=None,
+                  audio_level=0.0, microphone_level=None)
+
+    def _block_for_privacy(self, proc, code: str, message: str) -> None:
+        with self._lock:
+            if (self._proc is not proc or self._restart.is_set() or self._privacy_block is not None
+                    or not self.settings["capture_enabled"]):
+                return
+            self._privacy_block = code, message
+            self.buffer.reset()
+        self._set(state="privacy_blocked", privacy=code, message=message, input=None, kbps=0, audio=False, since=None,
+                  audio_level=0.0, microphone_level=None)
 
     def _go_stuck(self, why: str) -> None:
         if self.state.get("state") != "stuck":
@@ -278,8 +325,11 @@ class CaptureEngine:
                 else:
                     attempted = self._run_once()
             except Exception as exc:  # noqa: BLE001
-                self._set(state="error", message=str(exc)[:300], kbps=0, since=None)
-                log.exception("capture loop")
+                if isinstance(exc, BairdError) and exc.code == "monitor_reselect":
+                    self._block_for_selection(exc.message)
+                else:
+                    self._set(state="error", message=str(exc)[:300], kbps=0, since=None)
+                    log.exception("capture loop")
             with self._changed:
                 self._manual_open = False
                 if attempted and not self._restart.is_set() and self.state["state"] in ("no_signal", "no_device", "stuck", "error"):
@@ -306,7 +356,7 @@ class CaptureEngine:
             else:
                 self.buffer.reset()
                 self._fatal = None
-                proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                proc = subprocess.Popen(cmd, cwd=str(self._source_cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0, creationflags=NO_WINDOW)
                 self._proc = proc
         if limit:
@@ -315,10 +365,10 @@ class CaptureEngine:
         message = "Opening the capture source…" if self._alternate_source else "Opening the capture device…"
         self._set(state="starting", message=message, hint="", input=None, kbps=0, since=None)
         bind_to_app(proc)
-        err_thread = threading.Thread(target=self._read_events, args=(proc,), name="baird-capture-events", daemon=True)
-        err_thread.start()
         if source_state:
             self._set(**source_state)
+        err_thread = threading.Thread(target=self._read_events, args=(proc,), name="baird-capture-events", daemon=True)
+        err_thread.start()
         box = {"got_data": False}
         pump = threading.Thread(target=self._pump, args=(proc, box), name="baird-capture-pump", daemon=True)
         pump.start()
@@ -372,6 +422,8 @@ class CaptureEngine:
             return True
         err_thread.join(timeout=2)
         self._proc = None
+        if self._privacy_block is not None:
+            return True
         if closing or self._restart.is_set() or self._stop.is_set():
             self.buffer.reset()
             self._set(state="idle", message="", hint="", input=None, kbps=0, since=None)
@@ -380,7 +432,12 @@ class CaptureEngine:
         with self._lock:
             self.state["restarts"] = int(self.state.get("restarts", 0)) + 1
         if self._alternate_source:
-            self._set(state="error", message=f"The capture source stopped (code {code}).", kbps=0, since=None)
+            fatal = self._fatal
+            if fatal and fatal[0] == "monitor_reselect":
+                self._block_for_selection(fatal[1])
+            else:
+                message = fatal[1] if fatal else f"The capture source stopped (code {code})."
+                self._set(state="error", message=message, kbps=0, since=None)
             return True
         log.info("capture helper exited with %s", code)
         fatal = self._fatal
@@ -412,12 +469,21 @@ class CaptureEngine:
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 if not chunk or self._proc is not proc:
                     break
-                aligned, starts = self.buffer.feed(chunk)
+                with self._lock if self._demand_only else nullcontext():
+                    if self._privacy_block is not None:
+                        continue
+                    aligned, starts = self.buffer.feed(chunk)
                 if not aligned:
                     continue
                 end_total = self.buffer.bytes_total
                 box["got_data"] = True
                 if not ready and self.buffer.latest()[1]:
+                    if self._demand_only:
+                        # A monitor emits its encoder before publishing TS. The two pipe readers can see them out of order.
+                        with self._changed:
+                            self._changed.wait_for(lambda: self.state["encoder"] or self._proc is not proc, timeout=1.0)
+                            if self._proc is not proc or not self.state["encoder"]:
+                                continue
                     ready = True
                     self._fails = 0
                     with self._lock:
@@ -425,6 +491,8 @@ class CaptureEngine:
                         self._retry_at = 0.0
                     self._set(state="running", message="", hint="", since=time.time())
                 with self._lock:
+                    if self._privacy_block is not None:
+                        continue
                     listeners = list(self._listeners)
                 for fn in listeners:
                     try:
@@ -453,7 +521,8 @@ class CaptureEngine:
                           audio=self.buffer.audio_pid is not None or True)
                 log.info("capture ready: %s", line[:400])
             elif kind == "stats":
-                self._set(kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None)
+                self._set(kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None,
+                          **{key: evt[key] for key in ("audio_level", "microphone_level") if key in evt})
             elif kind == "signal":
                 self._set(input=evt.get("input"))
             elif kind == "error":
@@ -461,6 +530,8 @@ class CaptureEngine:
                 message = str(evt.get("message", ""))[:300]
                 if self._proc is proc:
                     self._fatal = (code, message, time.time())
+                    if self._demand_only and code in BLOCK_CODES:
+                        self._block_for_privacy(proc, code, message)
                 log.warning("capture helper: %s", line[:400])
             elif kind == "warning":
                 log.warning("capture helper: %s", line[:400])

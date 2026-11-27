@@ -12,8 +12,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Save the last N seconds (default 30, up to the memory window of 10–600 s) as MP4 instantly — `B`, `clip_save`.
 - Transcribe a document as it scrolls with `transcribe_start` (optional `region`) and `transcribe_stop`. Poll `capture_status.transcription` for progress and the final HTML path. The full recording stays in the library. Views are sampled twice per second and changed pictures are kept with local Windows OCR. Select the document area and scroll with overlap for a cleaner transcript. Optional `detail` values are `document` and `code`. The GPU pass starts after the Windows HTML is saved. Poll `capture_status.transcription.detail`, or use `transcribe_reread(name, mode)` on an existing Baird HTML and `transcribe_cancel_reread` to stop. The code mode expects a crop starting at the code margin. It flags uncertain lines. An unflagged line is still machine-read.
 - To enable the local second pass, set `unlimited-ocr.json` in Baird's data directory with absolute `python` and `model` paths and optionally a `gpu` index or list. The existing runtime needs PyTorch CUDA, Transformers with native `UnlimitedOcrForConditionalGeneration`, Pillow, NumPy and SciPy. The model directory contains the official Baidu Unlimited-OCR base weights and tokenizer. The worker loads local files, requests a GPU lease and exits after the job.
-- Record picture and sound until stopped — `R`, `record_start` / `record_stop`; a recording stops by itself, keeping
-  what was recorded, when the picture is lost. `media_list` shows the MP4 once finalization has saved its recording metadata.
+- Record picture and sound with `record_start`, `record_pause`, `record_resume` and `record_stop`. The paired pause and resume tools accept the same recording target. Baird saves the active spans to MP4 and keeps the recording when the picture is lost. `R` starts or stops from the page.
 - Library of screenshots, clips and recordings (`media_list`, newest first, with absolute paths): drag a card out
   (real file drag in the Hoard window, `DownloadURL` in a browser tab), copy the file to the Windows clipboard
   (`media_copy`), show in Explorer, rename, light 720p copy for chats (`media_light_copy`, NVENC or x264), delete to
@@ -88,7 +87,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Files: `Videos\Baird` (setting `media_dir`). Data: `data/` (settings, media index, thumbnails, logs, `mcp-token`).
 - Native helper: `native/bairdcap.cs` → `bairdcap.exe` (built on first start with the Windows C# compiler). Screen text for the
   copilot: `native/bairdocr.ps1` (Windows PowerShell 5.1 and `Windows.Media.Ocr`; started on first use, stopped when idle).
-- Hardware notes: `docs/DEVICE.md`. The source contract and the opt-in marked test feed are in `docs/CAPTURE_SOURCES.md`.
+- Hardware notes are in `docs/DEVICE.md`. The capture contract, monitor selection, loopback and optional microphone track are in `docs/CAPTURE_SOURCES.md`.
 
 ## Skills for the agents that connect
 

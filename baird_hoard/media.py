@@ -354,7 +354,7 @@ class Library:
         raw = self.config.work_dir / f"clip-{tmp.stem[5:]}-raw.mp4" if enhance_after else out
         try:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp), "-map", "0:v:0",
-                              "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(raw)], timeout=120)
+                              "-map", "0:a?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(raw)], timeout=120)
             if proc.returncode != 0 or not raw.is_file():
                 raw.unlink(missing_ok=True)
                 raise BairdError("failed", "Could not write the clip.", proc.stderr.decode("utf-8", "replace")[-300:])
@@ -517,19 +517,21 @@ class Library:
 
 
 class Recorder:
-    """Appends the live transport stream to ``<data>/work/rec-*.ts`` and turns it into MP4 in the library on stop."""
+    """Save the active transport-stream spans and assemble them into a library MP4 on stop."""
 
     def __init__(self, lib: Library):
         self.lib = lib
         self._lock = threading.RLock()
         self._file = None
-        self._tmp: Optional[Path] = None
+        self._segments: list[Path] = []
         self._target: Optional[Path] = None
         self._started = 0.0
+        self._elapsed = 0.0
+        self._encoder = ""
         self._from = 0
         self._bytes = 0
         self.last: Optional[dict[str, Any]] = None
-        self.state = "idle"            # idle | recording | finishing
+        self.state = "idle"            # idle | recording | paused | finishing
         self.message = ""
         self._end_of_stream = threading.Event()
         self._reader: Optional[threading.Thread] = None
@@ -542,10 +544,30 @@ class Recorder:
     def status(self) -> dict[str, Any]:
         with self._lock:
             out: dict[str, Any] = {"state": self.state, "message": self.message, "last": self.last}
-            if self.state == "recording":
-                out.update(seconds=round(time.time() - self._started, 1), bytes=self._bytes,
+            if self.state in ("recording", "paused"):
+                out.update(seconds=round(self._seconds(), 1), bytes=self._bytes, can_pause=self._reader is None,
                            target=self._target.name if self._target else None)
             return out
+
+    def _seconds(self) -> float:
+        return self._elapsed + (time.monotonic() - self._started if self.state == "recording" else 0)
+
+    def _buffer(self) -> TsBuffer:
+        return self.lib.stage.buffer if self._enhanced else self.lib.buffer
+
+    def _open_segment(self) -> Path:
+        segment = self.lib.config.work_dir / f"rec-{uuid.uuid4().hex[:8]}.ts"
+        self._file = segment.open("wb")
+        self._segments.append(segment)
+        return segment
+
+    def _close_segment(self) -> None:
+        f, self._file = self._file, None
+        if f is not None:
+            try:
+                f.close()
+            except OSError as exc:
+                self.message = f"Writing failed: {exc}"
 
     def start(self, *, read_stream: Optional[Callable[[Path, Path, threading.Event], None]] = None) -> dict[str, Any]:
         with self.lib.engine.request():
@@ -556,44 +578,99 @@ class Recorder:
                 if not use_enhanced:
                     note = "La mejora no estaba lista: se graba la señal original."
             with self._lock:
-                if self.state == "recording":
-                    raise BairdError("busy", "Already recording.", "record_stop ends it.")
+                if self.state in ("recording", "paused"):
+                    raise BairdError("busy", "A recording is already open.", "record_resume resumes it and record_stop ends it.")
                 if self.state == "finishing":
                     raise BairdError("busy", "The previous recording is still being written; try again in a moment.")
                 self.lib.engine.require_picture()
                 self.lib._need_ffmpeg()
                 self._enhanced = use_enhanced
-                head, self._from = (self.lib.stage.buffer if use_enhanced else self.lib.buffer).tail()
-                self._tmp = self.lib.config.work_dir / f"rec-{uuid.uuid4().hex[:8]}.ts"
+                head, self._from = self._buffer().tail()
+                self._encoder = self.lib.engine.snapshot()["encoder"]
                 self._target = self.lib._new_path("Grabación", ".mp4")
-                self._file = open(self._tmp, "wb")
+                self._segments = []
+                segment = self._open_segment()
                 self._file.write(head)
                 self._end_of_stream = threading.Event()
                 self._reader = None
                 if read_stream is not None:
                     self._file.flush()
-                    self._reader = threading.Thread(target=read_stream, args=(self._tmp, self._target, self._end_of_stream),
+                    self._reader = threading.Thread(target=read_stream, args=(segment, self._target, self._end_of_stream),
                                                     name="baird-document", daemon=True)
                     self._reader.start()
                 self._bytes = len(head)
-                self._started = time.time()
+                self._started = time.monotonic()
+                self._elapsed = 0.0
                 self.lib.engine.set_demand("recording", True)
                 self.state, self.message = "recording", note
                 return self.status()
 
+    def _check_target(self, target: str | None) -> None:
+        if target is not None and (self._target is None or self._target.name != target):
+            raise BairdError("conflict", "This recording already ended.")
+
+    def pause(self, *, target: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            self._check_target(target)
+            if self.state == "paused":
+                return self.status()
+            if self.state != "recording" or self._reader is not None:
+                raise BairdError("conflict", "There is no pausable recording.")
+            self._close_segment()
+            self._elapsed = self._seconds()
+            self.state = "paused"
+            self.lib.engine.set_demand("recording", False)
+            return self.status()
+
+    def resume(self, *, target: str | None = None) -> dict[str, Any]:
+        with self._lock:
+            self._check_target(target)
+            if self.state == "recording":
+                return self.status()
+            if self.state != "paused":
+                raise BairdError("conflict", "There is no paused recording.")
+            target = self._target.name
+            enhanced = self._enhanced
+        with self.lib.engine.request():
+            self.lib.engine.wait_for_picture()
+            if enhanced and not self.lib.stage.wait_flowing(12.0):
+                raise BairdError("unavailable", "The enhanced picture is not ready.")
+            with self._lock:
+                self._check_target(target)
+                if self.state == "recording":
+                    return self.status()
+                if self.state != "paused":
+                    raise BairdError("conflict", "There is no paused recording.")
+                self.lib.engine.require_picture()
+                if self.lib.engine.snapshot()["encoder"] != self._encoder:
+                    self.source_changed()
+                    raise BairdError("conflict", "The encoder changed. The original recording is being saved.")
+                self._from = self._buffer().tail()[1]
+                self._started = time.monotonic()
+                self.state = "recording"
+                self.lib.engine.set_demand("recording", True)
+                return self.status()
+
     def _on_data(self, aligned: bytes, starts: list[int], end_total: int) -> None:
         if not self._enhanced:
-            self._write(aligned, end_total)
+            self._write(aligned, starts, end_total)
 
     def _on_enhanced(self, aligned: bytes, starts: list[int], end_total: int) -> None:
         if self._enhanced:
-            self._write(aligned, end_total)
+            self._write(aligned, starts, end_total)
 
-    def _write(self, aligned: bytes, end_total: int) -> None:
+    def _write(self, aligned: bytes, starts: list[int], end_total: int) -> None:
         with self._lock:
-            if self.state != "recording" or self._file is None or end_total <= self._from:
+            if self.state != "recording" or end_total <= self._from:
                 return
             try:
+                if self._file is None:
+                    first_offset = end_total - len(aligned)
+                    start = next((offset for offset in starts if first_offset + offset >= self._from), None)
+                    if start is None:
+                        return
+                    self._open_segment()
+                    aligned = self._buffer().header + aligned[start:]
                 self._file.write(aligned)
                 self._bytes += len(aligned)
             except OSError as exc:
@@ -606,50 +683,76 @@ class Recorder:
             if self.state == "recording" and state not in ("running", "starting"):
                 self.message = "The recording stopped because the picture was lost."
                 self._finish_locked()
+            elif self.state == "paused" and state == "reselect":
+                self.source_changed()
+
+    def source_changed(self) -> None:
+        with self._lock:
+            if self.state in ("recording", "paused"):
+                self.message = "The recording stopped because the capture source changed."
+                self._finish_locked()
 
     def stop(self, *, target: Optional[str] = None) -> dict[str, Any]:
         with self._lock:
-            if target is not None and (self._target is None or self._target.name != target):
-                raise BairdError("conflict", "This recording already ended.")
-            if self.state != "recording":
+            self._check_target(target)
+            if self.state not in ("recording", "paused"):
                 raise BairdError("conflict", "Nothing is being recorded.")
             self._finish_locked()
             return self.status()
 
     def _finish_locked(self) -> None:
-        f, tmp, target, enhanced = self._file, self._tmp, self._target, self._enhanced
-        self._file = None
-        if f:
-            f.close()
+        segments, target, enhanced = tuple(self._segments), self._target, self._enhanced
+        self._close_segment()
         self._end_of_stream.set()
         reader, self._reader = self._reader, None
+        seconds = round(self._seconds(), 1)
         self.state = "finishing"
         self.lib.engine.set_demand("recording", False)
-        seconds = round(time.time() - self._started, 1)
 
         def work() -> None:
             ff = self.lib.ffmpeg or "ffmpeg"
             result: dict[str, Any]
+            saved = False
             if reader is not None:
                 reader.join()  # The document reader consumes the final bytes before the TS is moved or deleted.
             try:
-                proc = self.lib._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp),
-                                      "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(target)],
-                                     timeout=3600)
+                inputs = ["-i", str(segments[0])]
+                if len(segments) > 1:
+                    manifest = segments[0].with_suffix(".ffconcat")
+                    manifest.write_text("ffconcat version 1.0\n" + "".join(f"file '{p.name}'\n" for p in segments),
+                                        encoding="ascii")
+                    inputs = ["-f", "concat", "-safe", "1", "-i", str(manifest)]
+                proc = self.lib._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", *inputs,
+                                      "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                                      "-movflags", "+faststart", str(target)], timeout=3600)
                 if proc.returncode == 0 and target is not None and target.is_file():
                     # Keep the file out of library scans until its recording metadata is saved.
                     result = self.lib._remember(target, origin="recording", enhanced=True if enhanced else None,
                                                 **self.lib._probe(target), probed=True)
-                    if tmp:
-                        tmp.unlink(missing_ok=True)
+                    saved = True
+                    for part in segments:
+                        part.unlink(missing_ok=True)
+                    segments[0].with_suffix(".ffconcat").unlink(missing_ok=True)
                 else:
-                    # Keep the transport stream: nothing recorded is lost.
-                    keep = target.with_suffix(".ts") if target else None
-                    if tmp and keep:
-                        os.replace(tmp, keep)
-                    result = {"name": keep.name if keep else "", "error": proc.stderr.decode("utf-8", "replace")[-300:]}
+                    target.unlink(missing_ok=True)
+                    if len(segments) == 1:
+                        keep = target.with_suffix(".ts")
+                        os.replace(segments[0], keep)
+                        result = {"name": keep.name}
+                    else:
+                        result = {"parts": [str(part) for part in segments],
+                                  "manifest": str(segments[0].with_suffix(".ffconcat"))}
+                    result["error"] = proc.stderr.decode("utf-8", "replace")[-300:]
             except Exception as exc:  # noqa: BLE001
-                result = {"error": str(exc)[:300]}
+                if target and not saved:
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError:
+                        log.warning("could not remove incomplete recording %s", target, exc_info=True)
+                if not saved:
+                    result = {"error": str(exc)[:300], "parts": [str(part) for part in segments if part.is_file()]}
+                else:
+                    log.warning("could not remove recording work files", exc_info=True)
             with self._lock:
                 self._target = None
                 self.last = {**result, "seconds": seconds}

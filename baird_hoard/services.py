@@ -10,7 +10,7 @@ from typing import Any
 from . import __version__
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .capture_source import SyntheticSource
-from .config import Config, Settings
+from .config import REPO_ROOT, Config, Settings
 from .copilot import Copilot
 from .enhance import EnhanceStage, Enhancer, StageSource
 from .hoard_link import fam_notify, family
@@ -18,6 +18,8 @@ from .hoard_link.tokens import read_or_create_token
 from .hotkeys import HotkeyHelper
 from .live import LiveRemux
 from .media import Library
+from .monitor_source import MonitorSource, normalize_selection, selected_monitor
+from .native import NATIVE_DIR
 from .ocr import OcrIndex, fold
 from .recording_search import RecordingSearch
 from .textmap import TextReader
@@ -31,7 +33,7 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 
 class Services:
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -40,9 +42,16 @@ class Services:
         self.ffprobe = ffprobe_path(self.ffmpeg)
         self.buffer = TsBuffer(keep_seconds=self.settings["buffer_seconds"])
         self._last_state = "off"
-        source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else None
+        self.monitor_source = None
+        if config.monitor_capture and not config.synthetic_capture:
+            self.monitor_source = monitor_source or MonitorSource(
+                self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
+            )
+        source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
-                                    fake_source=config.fake_source, source=source)
+                                    fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,
+                                    graceful_stop=self.monitor_source is not None,
+                                    source_cwd=REPO_ROOT if self.monitor_source is not None else NATIVE_DIR)
         self.live = LiveRemux(self.engine, self.ffmpeg)
         self.enhancer = Enhancer(self.ffmpeg, self.ffprobe, config.work_dir)
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
@@ -75,7 +84,7 @@ class Services:
         self.recordings.stop()
         self.transcriber.detail.cancel(closing=True)
         self.copilot.close()
-        if self.library.recorder.state == "recording":
+        if self.library.recorder.state in ("recording", "paused"):
             try:
                 self.library.recorder.stop()
             except Exception:  # noqa: BLE001
@@ -114,6 +123,8 @@ class Services:
         state = snap.get("state", "")
         previous, self._last_state = self._last_state, state
         self.library.recorder.on_capture_state(state)
+        if state == "privacy_blocked":
+            self.library.recorder.source_changed()
         self.stage.raw_state(state == "running")
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
@@ -131,9 +142,17 @@ class Services:
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         before = self.settings.get()
+        if self.monitor_source is not None and changes.get("monitor") is not None:
+            selected_monitor(normalize_selection(changes["monitor"]), self.monitor_source.inventory())
         after = self.settings.update(changes)
         self.buffer.keep_seconds = after["buffer_seconds"]
-        reopen = not self.config.synthetic_capture and any(before[k] != after[k] for k in ("device", "audio_input"))
+        if self.monitor_source is not None:
+            different_source = any(before[k] != after[k] for k in ("monitor", "monitor_microphone"))
+            if different_source:
+                self.library.recorder.source_changed()
+            reopen = different_source or "monitor" in changes
+        else:
+            reopen = not self.config.synthetic_capture and any(before[k] != after[k] for k in ("device", "audio_input"))
         if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):
             self.engine.settings_changed(reopen=reopen)
         if before["enhance"] != after["enhance"]:

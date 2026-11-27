@@ -397,7 +397,7 @@ class Enhancer:
     def file_command(self, src: Path, dst: Path, fx: dict[str, Any], info: dict[str, Any]) -> tuple[list[str], Chain, str]:
         chain, caps = self.chain_for(fx, info["width"], info["height"], info["fps"], live=False)
         enc, name = encoder_args(caps, int(fx["gpu"]), chain.out_w, chain.out_h, chain.out_fps, hdr=chain.hdr, live=False)
-        cmd = [self._need_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *chain.hw_args, "-i", str(src), "-map", "0:v:0", "-map", "0:a:0?"]
+        cmd = [self._need_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", *chain.hw_args, "-i", str(src), "-map", "0:v:0", "-map", "0:a?"]
         if chain.vf:
             cmd += ["-vf", chain.vf]
         cmd += [*enc, "-c:a", "copy", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(dst)]
@@ -670,7 +670,7 @@ class EnhanceStage(_Listenable):
             enc, name = encoder_args(caps, int(fx["gpu"]), chain.out_w, chain.out_h, chain.out_fps, hdr=False, live=True)
             cmd = [self.enhancer._need_ffmpeg(), "-hide_banner", "-loglevel", "error", *chain.hw_args, "-fflags", "+genpts+nobuffer+discardcorrupt",
                    "-flags", "low_delay", "-probesize", "2000000", "-analyzeduration", "2000000", "-f", "mpegts", "-i", "pipe:0",
-                   "-map", "0:v:0", "-map", "0:a:0?"]
+                   "-map", "0:v:0", "-map", "0:a?"]
             if chain.vf:
                 cmd += ["-vf", chain.vf]
             cmd += [*enc, "-c:a", "copy", "-flush_packets", "1", "-muxdelay", "0", "-f", "mpegts", "-progress", "pipe:2", "-stats_period", "1", "pipe:1"]

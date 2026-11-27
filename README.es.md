@@ -59,7 +59,11 @@ La captura se abre bajo demanda: un directo visible, una grabación, una regla d
 
 ## Ajustes
 
+La fuente de monitor de Windows es opcional. Captura la pantalla elegida con sonido del sistema en bucle y una pista de micrófono si se activa. El [contrato de fuentes](docs/CAPTURE_SOURCES.md) explica el ajuste de proceso y la API de selección.
+
 Captura activada o no (desactivada libera la capturadora para otros programas), captura siempre activa opcional, dispositivo, entrada de audio (HDMI o línea), formato de captura, duración del clip, ventana de memoria (10–600 s), carpeta de medios, tamaño y bitrate de las copias ligeras, OCR automático, atajos globales y su combinación (con un modificador y distintas entre sí). El copilot tiene su bloque (`copilot`): si un asistente puede dibujar sobre el directo (el interruptor está en el botón Copilot), el tamaño de la imagen que recibe al mirar, los minutos tras los que se cierra una sesión que nadie toca y el idioma en que Windows lee la pantalla.
+
+El productor de monitor requiere un adaptador de privacidad antes de abrir la pantalla o el audio. [Contrato de privacidad](docs/CAPTURE_SOURCES.md)
 
 ## Conexión con Faustus y Hoard Hub
 
@@ -69,7 +73,7 @@ El Hub arranca y para la app desde su ficha, y el manifiesto `faustus-plugin.jso
 
 | Grupo | Herramientas |
 |---|---|
-| Captura | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_stop` |
+| Captura | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_pause`, `record_resume`, `record_stop` |
 | Biblioteca | `media_list`, `media_look`, `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list` |
 | Texto | `media_search`, `media_ocr`, `ocr_reindex` |
 | Faustus | `send_to_faustus` |
@@ -88,7 +92,7 @@ La app lleva además procedimientos de la biblioteca de skills de la familia par
 | `GET /api/health` | servicio, estado de la captura, resolución de entrada |
 | `GET /api/status` | captura, grabación, trabajos, visores y tiempos de reintento |
 | `POST /api/capture/retry` | adelanta un reintento pendiente mientras haya demanda, dentro del límite horario; `?manual=true` (el botón del directo) abre una vez por encima de él |
-| `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/stop` | los tres botones |
+| `POST /api/snapshot`, `/api/clip`, `/api/record/start`, `/api/record/pause`, `/api/record/resume`, `/api/record/stop` | controles de captura y grabación |
 | `GET /api/media`, `GET /media/{name}`, `GET /api/thumb/{name}` | biblioteca, archivos, miniaturas |
 | `POST /api/media/{name}/copy` · `/reveal` · `/light` · `/rename`, `DELETE /api/media/{name}` | acciones sobre archivos |
 | `POST /api/snapshot` con `{"region": {x,y,w,h,unit}}` | captura de una zona |
