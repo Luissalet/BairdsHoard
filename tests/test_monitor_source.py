@@ -41,6 +41,10 @@ def capture_control_headers(client):
     return {"origin": str(client.base_url).rstrip("/"), "sec-fetch-site": "same-origin"}
 
 
+def confirm_test_shortcut(key, cancelled):
+    return 6 <= key <= 11 and not cancelled.is_set()
+
+
 def set_local_capture(client, enabled):
     headers = capture_control_headers(client)
     issued = client.post(CAPTURE_CONTROL, headers=headers)
@@ -257,7 +261,7 @@ def test_services_open_only_on_demand_and_require_a_new_selection(stream, tmp_pa
     monkeypatch.setattr(capture, "ensure_helper", lambda: pytest.fail("unexpected HDMI helper"))
     source = MonitorSource(FFMPEG, tmp_path, lambda: inventory, producer)
     profile = Config(data_dir=tmp_path / "profile", port=PORT, monitor_capture=True, isolated_instance=True, background=False)
-    svc = Services(profile, monitor_source=source)
+    svc = Services(profile, monitor_source=source, confirm_capture=confirm_test_shortcut)
     svc.settings.update({"capture_always_on": True, "ocr_auto": False})
 
     with TestClient(create_app(profile, svc), base_url=f"http://127.0.0.1:{PORT}", client=("127.0.0.1", 50000)) as client:

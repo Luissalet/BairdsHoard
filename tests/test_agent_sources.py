@@ -9,11 +9,12 @@ from contextlib import closing, nullcontext
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from baird_hoard import capture
+from baird_hoard import capture, capture_approval
 from baird_hoard.agent_sources import SourceArgs, call_on_source
 from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
@@ -22,8 +23,8 @@ from baird_hoard.monitor_source import MonitorSource
 from baird_hoard.services import Services
 
 from .conftest import FFMPEG
-from .test_monitor_source import (CAPTURE_CONTROL, MONITOR, SECOND, capture_control_headers, make_small_transport,
-                                  set_local_capture)
+from .test_monitor_source import (CAPTURE_CONTROL, MONITOR, SECOND, capture_control_headers, confirm_test_shortcut,
+                                  make_small_transport, set_local_capture)
 
 PORT = 17531
 SOURCE = {"mode": "monitor", "monitor": MONITOR.id}
@@ -52,7 +53,7 @@ def profile(tmp_path, monkeypatch):
     source = MonitorSource(FFMPEG or "ffmpeg", tmp_path, lambda: [MONITOR, SECOND], unexpected_device)
     config = Config(data_dir=tmp_path / "profile", port=PORT, monitor_capture=True,
                     isolated_instance=True, background=False)
-    svc = Services(config, monitor_source=source)
+    svc = Services(config, monitor_source=source, confirm_capture=confirm_test_shortcut)
     with TestClient(create_app(config, svc), base_url=f"http://127.0.0.1:{PORT}", client=("127.0.0.1", 50000)) as client:
         yield client, svc
 
@@ -126,6 +127,85 @@ def test_disabled_source_gets_an_explicit_error_before_capture(profile):
     stopped = agent(client, "record_stop", {"source": SOURCE})
     assert stopped.status_code == 409 and stopped.json()["code"] == "conflict"
     assert svc.engine._thread is None and not svc.engine._demands and svc.buffer.latest()[1] == 0
+
+
+def test_complete_http_request_cannot_replace_local_approval(profile, monkeypatch):
+    client, svc = profile
+    attempts = []
+
+    def deny(key, cancelled):
+        attempts.append((key, cancelled.is_set()))
+        return False
+
+    monkeypatch.setattr(svc.sources, "_confirm", deny, raising=False)
+    agent(client, "source_select", SOURCE)
+    headers = capture_control_headers(client)
+    ticket = client.post(CAPTURE_CONTROL, headers=headers).json()["ticket"]
+    forged = client.put(CAPTURE_CONTROL, headers=headers, json={"ticket": ticket, "enabled": True, "approved": True})
+    assert forged.status_code == 400 and not attempts
+    reply = client.put(CAPTURE_CONTROL, headers=headers, json={"ticket": ticket, "enabled": True})
+    assert reply.status_code == 403 and reply.json()["code"] == "source_approval_required"
+    assert len(attempts) == 1 and not attempts[0][1]
+    assert not svc.settings["capture_enabled"] and svc.engine._thread is None
+
+
+def test_windows_confirmation_requires_the_matching_message_and_unregisters(monkeypatch):
+    native = SimpleNamespace(RegisterHotKey=Mock(return_value=1), UnregisterHotKey=Mock(return_value=1))
+    events = []
+
+    def peek(pointer, window, first, last, flags):
+        assert window is None and first == last == 0x312
+        if not flags:
+            return 0
+        _, identifier, modifiers, vk = native.RegisterHotKey.call_args.args
+        events.append(identifier)
+        pointer._obj.wParam = identifier if len(events) > 1 else identifier + 1
+        pointer._obj.lParam = (vk << 16) | (modifiers & 7)
+        return 1
+
+    native.PeekMessageW = Mock(side_effect=peek)
+    monkeypatch.setattr(capture_approval, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(capture_approval.ctypes, "WinDLL", lambda *a, **kw: native, raising=False)
+    assert capture_approval.confirm_with_windows(8, threading.Event())
+    window, identifier, modifiers, vk = native.RegisterHotKey.call_args.args
+    assert window is None and vk == 0x77 and modifiers == 0x4007
+    assert events == [identifier, identifier]
+    native.UnregisterHotKey.assert_called_once_with(None, identifier)
+
+
+@pytest.mark.parametrize("change", ["selection", "layout", "cancel"])
+def test_approval_cannot_activate_a_changed_or_cancelled_source(profile, monkeypatch, change):
+    client, svc = profile
+    agent(client, "source_select", SOURCE)
+    headers = capture_control_headers(client)
+    control = client.post(CAPTURE_CONTROL, headers=headers).json()
+    args = {"ticket": control["ticket"], "enabled": True}
+    waiting, gesture = threading.Event(), threading.Event()
+
+    def confirm(key, cancelled):
+        assert key == control["approval_key"]
+        waiting.set()
+        assert gesture.wait(12)
+        return True  # Exercise the race even if the listener already had a matching event.
+
+    monkeypatch.setattr(svc.sources, "_confirm", confirm)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(client.put, CAPTURE_CONTROL, headers=headers, json=args)
+        try:
+            assert waiting.wait(12)
+            assert agent(client, "screen_look").json()["code"] == "source_off"
+            if change == "selection":
+                assert agent(client, "source_select", {"mode": "monitor", "monitor": SECOND.id}).status_code == 200
+            elif change == "layout":
+                svc.monitor_source = replace(svc.monitor_source, inventory=lambda: [replace(MONITOR, x=-500), SECOND])
+            else:
+                cancelled = client.request("DELETE", CAPTURE_CONTROL, headers=headers, json={"ticket": control["ticket"]})
+                assert cancelled.status_code == 204
+        finally:
+            gesture.set()
+        reply = pending.result(timeout=12)
+    assert reply.status_code == (409 if change == "layout" else 403)
+    assert not svc.settings["capture_enabled"] and svc.engine._thread is None
 
 
 def test_capture_ticket_belongs_to_its_browser_and_selection(profile):
@@ -226,6 +306,62 @@ def test_pending_snapshot_never_reaches_library_or_ocr(rendered_picture, monkeyp
     assert [row["name"] for row in svc.library.list(kind="image")] == [published]
     assert [path.name for path in svc.library.folder.iterdir()] == [published]
     assert set(svc.library._index) == {published} and len(notified) == 1
+
+
+@pytest.mark.parametrize("pipeline", ["plain", "live-enhanced", "rendered", "fallback"])
+def test_pending_clip_never_reaches_library(rendered_picture, monkeypatch, pipeline):
+    client, svc = rendered_picture
+    monkeypatch.setattr(svc.buffer, "since", lambda seconds: [b"synthetic-transport"])
+    monkeypatch.setattr(svc.buffer, "seconds_kept", lambda: 1.0)
+    monkeypatch.setattr(svc.library, "wants_enhanced", lambda: pipeline != "plain")
+    live = svc.buffer if pipeline == "live-enhanced" else SimpleNamespace(seconds_kept=lambda: 0)
+    monkeypatch.setattr(svc.library, "stage", SimpleNamespace(buffer=live))
+    monkeypatch.setattr(svc.library, "_probe", lambda path: {"duration": 1.0})
+    staged, finish = threading.Event(), threading.Event()
+
+    def hold():
+        staged.set()
+        assert finish.wait(12)
+
+    def mux(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"synthetic-mp4")
+        if pipeline in ("plain", "live-enhanced") and not finish.is_set():
+            hold()
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    def enhance(raw, draft, fx):
+        assert raw.read_bytes() == b"synthetic-mp4" and not fx["hdr"]
+        draft.write_bytes(b"synthetic-enhanced")
+        if not finish.is_set():
+            hold()
+        if pipeline == "fallback":
+            raise BairdError("unavailable", "synthetic enhancement error")
+
+    monkeypatch.setattr(svc.library, "_run", mux)
+    monkeypatch.setattr(svc.library, "enhancer", SimpleNamespace(enhance_file=enhance))
+    finish.set()
+    approved = agent(client, "clip_save", {"seconds": 1})
+    assert approved.status_code == 200, approved.text
+    saved = approved.json()
+    assert saved["enhanced"] == (pipeline in ("live-enhanced", "rendered"))
+    filename = saved["name"]
+    original = Path(saved["path"]).read_bytes()
+    finish.clear()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(agent, client, "clip_save", {"seconds": 1})
+        try:
+            assert staged.wait(12)
+            assert [item["name"] for item in svc.library.list(kind="video")] == [filename]
+            set_local_capture(client, False)
+        finally:
+            finish.set()
+        reply = pending.result(timeout=12)
+
+    assert reply.status_code == 403 and reply.json()["code"] == "source_off"
+    assert [item.name for item in svc.library.folder.iterdir()] == [filename]
+    assert set(svc.library._index) == {filename} and Path(saved["path"]).read_bytes() == original
+    assert not list(svc.config.work_dir.glob("clip-*.ts"))
 
 
 @pytest.mark.parametrize("url", [None, "/copilot/look.jpg"])
@@ -347,7 +483,7 @@ def test_authorized_mock_picture_and_expired_copilot_cache(tmp_path, monkeypatch
     source = MonitorSource(FFMPEG, tmp_path, lambda: [MONITOR], producer)
     config = Config(data_dir=tmp_path / "profile", port=PORT, isolated_instance=True,
                     monitor_capture=True, background=False)
-    svc = Services(config, monitor_source=source)
+    svc = Services(config, monitor_source=source, confirm_capture=confirm_test_shortcut)
     svc.settings.update({"ocr_auto": False})
     with TestClient(create_app(config, svc), base_url=f"http://127.0.0.1:{PORT}", client=("127.0.0.1", 50000)) as client:
         assert not agent(client, "source_select", SOURCE).json()["active"]

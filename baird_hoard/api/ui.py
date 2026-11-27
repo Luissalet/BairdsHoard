@@ -303,9 +303,12 @@ def _capture_control_response(request: Request, session: str):
     return response
 
 
-class CaptureControlBody(BaseModel):
+class CaptureTicketBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ticket: str = Field(min_length=43, max_length=43)
+
+
+class CaptureControlBody(CaptureTicketBody):
     enabled: StrictBool
 
 
@@ -318,6 +321,13 @@ def set_capture_control(request: Request, body: CaptureControlBody):
         raise activation_required()
     svc.sources.set_capture(session=session, ticket=body.ticket, enabled=body.enabled)
     return _capture_control_response(request, session)
+
+
+@router.delete(CONTROL_PATH, status_code=204)
+def cancel_capture_control(request: Request, body: CaptureTicketBody):
+    _require_capture_control(request)
+    if session := request.cookies.get(CONTROL_COOKIE):
+        services(request).sources.cancel_capture_control(session=session, ticket=body.ticket)
 
 
 @router.get("/api/devices")

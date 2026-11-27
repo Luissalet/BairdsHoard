@@ -10,6 +10,7 @@ from typing import Any
 from . import __version__
 from .agent_sources import ProfileSources, capture_publication
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
+from .capture_approval import ConfirmCapture, confirm_with_windows
 from .capture_source import SyntheticSource
 from .config import REPO_ROOT, Config, Settings
 from .copilot import Copilot
@@ -34,7 +35,8 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 
 class Services:
-    def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None):
+    def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None,
+                 confirm_capture: ConfirmCapture = confirm_with_windows):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -60,7 +62,7 @@ class Services:
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
-        self.sources = ProfileSources(self)
+        self.sources = ProfileSources(self, confirm_capture)
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)

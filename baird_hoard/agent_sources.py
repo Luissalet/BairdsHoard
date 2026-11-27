@@ -7,12 +7,13 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from secrets import token_urlsafe
+from secrets import choice, token_urlsafe
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .capture_approval import APPROVAL_KEYS, ConfirmCapture
 from .errors import BairdError
 from .monitor_source import selected_monitor
 
@@ -107,9 +108,11 @@ CONTROL_LIFETIME = 600
 class CaptureControl:
     session: str
     revision: int
+    mode: SourceMode
     monitor: str
     active: bool
     expires: float
+    key: int
 
 
 def activation_required() -> BairdError:
@@ -123,12 +126,14 @@ class ProfileSources:
     operations when the live selector is composed with the monitor backend.
     """
 
-    def __init__(self, services):
+    def __init__(self, services, confirm_capture: ConfirmCapture):
         self._services = services
         self.lock = threading.RLock()
         self._revision = 0
         self._undo: tuple[str, int, dict[str, str] | None] | None = None
         self._controls: dict[str, CaptureControl] = {}
+        self._confirm = confirm_capture
+        self._pending_capture: tuple[str, str, threading.Event] | None = None
 
     def status(self, *, list_displays: bool = False) -> dict[str, Any]:
         svc = self._services
@@ -162,6 +167,8 @@ class ProfileSources:
     def advance_revision(self) -> None:
         self._revision += 1
         self._controls.clear()
+        if self._pending_capture is not None:
+            self._pending_capture[2].set()
 
     def capture_control(self, session: str) -> dict[str, Any]:
         """Issue a single-use control for the display shown to the person."""
@@ -177,10 +184,22 @@ class ProfileSources:
             if len(self._controls) >= 64:
                 self._controls.pop(next(iter(self._controls)))
             ticket = token_urlsafe(32)
-            self._controls[ticket] = CaptureControl(session, self._revision, state["monitor"],
-                                                    armed, now + CONTROL_LIFETIME)
+            key = choice(APPROVAL_KEYS)
+            self._controls[ticket] = CaptureControl(session, self._revision, state["mode"], state["monitor"],
+                                                    armed, now + CONTROL_LIFETIME, key)
             shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
-            return {"active": armed, "display": shown, "ticket": ticket}
+            return {"active": armed, "display": shown, "ticket": ticket, "approval_key": key}
+
+    def _validate_control(self, grant: CaptureControl, enabled: bool) -> None:
+        svc = self._services
+        state = self.status()
+        if (grant.expires <= time.monotonic() or grant.revision != self._revision
+                or grant.mode != state["mode"] or (state["blocked"] and enabled)
+                or grant.monitor != state["monitor"] or grant.active != svc.settings["capture_enabled"]
+                or grant.active == enabled):
+            raise activation_required()
+        if enabled:
+            selected_monitor(svc.settings["monitor"], svc.monitor_source.inventory())
 
     def set_capture(self, *, session: str, ticket: str, enabled: bool) -> None:
         with self.lock:
@@ -188,15 +207,37 @@ class ProfileSources:
             if grant is None or grant.session != session:
                 raise activation_required()
             del self._controls[ticket]
-            state = self.status()
-            if (grant.expires <= time.monotonic() or grant.revision != self._revision or (state["blocked"] and enabled)
-                    or grant.monitor != state["monitor"] or grant.active == enabled):
-                raise activation_required()
-            if enabled:
-                svc = self._services
-                # Verify the current layout again. A ticket may be open while the desktop changes.
-                selected_monitor(svc.settings["monitor"], svc.monitor_source.inventory())
-            self._services.apply_settings({"capture_enabled": enabled})
+            self._validate_control(grant, enabled)
+            if not enabled:
+                self._services.apply_settings({"capture_enabled": False})
+                return
+            if self._pending_capture is not None:
+                raise BairdError("source_approval_pending", "A local capture confirmation is already pending.", status=409)
+            cancelled = threading.Event()
+            self._pending_capture = (session, ticket, cancelled)
+
+        try:
+            try:
+                approved = self._confirm(grant.key, cancelled)
+            except OSError:
+                approved = False
+            with self.lock:
+                if approved is not True or cancelled.is_set():
+                    raise BairdError("source_approval_required", "Confirm the selected screen with the Windows shortcut shown in Baird.", status=403)
+                self._validate_control(grant, True)
+                self._services.apply_settings({"capture_enabled": True})
+        finally:
+            with self.lock:
+                self._pending_capture = None
+
+    def cancel_capture_control(self, *, session: str, ticket: str) -> None:
+        with self.lock:
+            grant = self._controls.get(ticket)
+            if grant is not None and grant.session == session:
+                del self._controls[ticket]
+            pending = self._pending_capture
+            if pending is not None and pending[:2] == (session, ticket):
+                pending[2].set()
 
     def _check_recording(self) -> None:
         if self._services.library.recorder.status()["state"] in ("recording", "paused", "finishing"):

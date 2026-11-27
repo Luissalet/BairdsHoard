@@ -14,6 +14,7 @@ const state = {
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || 'GET', headers: {} };
+  if (opts.keepalive) init.keepalive = true;
   if (opts.body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.body); }
   const res = await fetch(path, init);
   const text = await res.text();
@@ -765,6 +766,7 @@ $('tabs').addEventListener('click', (e) => {
 
 let settingsLocalCapture = false;
 let settingsCaptureControl = null;
+let settingsCapturePending = null;
 const settingsCaptureSwitch = $('settings-form').capture_enabled;
 
 function showCaptureControl(control) {
@@ -788,23 +790,50 @@ async function loadCaptureControl() {
   catch { showCaptureControl(null); }
 }
 
+function cancelCaptureConfirmation() {
+  const pending = settingsCapturePending;
+  if (pending) {
+    settingsCapturePending = null;
+    api('/api/settings/capture-control', { method: 'DELETE', body: pending, keepalive: true }).catch(() => {});
+  }
+}
+
 settingsCaptureSwitch.addEventListener('click', async (event) => {
   if (!settingsLocalCapture) return;
   if (!event.isTrusted || !navigator.userActivation?.isActive || !settingsCaptureControl?.ticket) {
     event.preventDefault();
     return;
   }
-  const { ticket, active } = settingsCaptureControl;
+  const { ticket, active, approval_key: key } = settingsCaptureControl;
   const enabled = settingsCaptureSwitch.checked;
+  const operation = { ticket };
+  settingsCapturePending = operation;
   settingsCaptureControl = null;
   settingsCaptureSwitch.disabled = true;
-  try {
-    showCaptureControl(await api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } }));
-    refreshStatus();
-  } catch (err) {
+  if (enabled) {
     settingsCaptureSwitch.checked = active;
-    fail(err);
-    await loadCaptureControl();
+    const label = $('capture-enabled-label');
+    const display = label.textContent;
+    label.setAttribute('aria-live', 'polite');
+    label.textContent = captureText(
+      `${display} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
+      `${display} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
+    );
+  }
+  try {
+    const control = await api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } });
+    if (settingsCapturePending === operation) {
+      showCaptureControl(control);
+      refreshStatus();
+    }
+  } catch (err) {
+    if (settingsCapturePending === operation) {
+      settingsCaptureSwitch.checked = active;
+      fail(err);
+      await loadCaptureControl();
+    }
+  } finally {
+    if (settingsCapturePending === operation) settingsCapturePending = null;
   }
 });
 
@@ -855,7 +884,9 @@ $('btn-devices').addEventListener('click', async () => {
 });
 
 $('btn-settings').addEventListener('click', openSettings);
+window.addEventListener('pagehide', cancelCaptureConfirmation);
 $('settings').addEventListener('close', async () => {
+  cancelCaptureConfirmation();
   if ($('settings').returnValue !== 'save') return;
   const f = $('settings-form');
   const body = {
