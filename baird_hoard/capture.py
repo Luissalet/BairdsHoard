@@ -9,7 +9,7 @@ import sqlite3
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -501,7 +501,7 @@ class CaptureEngine:
         return True
 
     def revoke_local_source(self, gate: ScreenGate, reason: BlockReason | None, *, confirm: bool = True) -> None:
-        """Close the scoped producer before waiting for its authorized read to drain."""
+        """Close the scoped producer before waiting for authorized capture work to drain."""
         proc = None
         with self._changed:
             gate.block(reason)
@@ -545,6 +545,7 @@ class CaptureEngine:
         out = proc.stdout
         if out is None:
             return
+        gate = local.gate if local is not None else None
         ready = False
         try:
             while True:
@@ -552,10 +553,12 @@ class CaptureEngine:
                     chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 else:
                     read = getattr(out, "read1", None) or out.read
-                    gate = local.gate
                     if gate is None or not self._check_local_policy(local):
                         break
-                    chunk = gate.read_transport(read, 65536)
+                    with gate.capture_io() as allowed:
+                        if not allowed:
+                            break
+                        chunk = read(65536)
                 if not chunk:
                     break
                 if local is not None and not self._check_local_policy(local):
@@ -580,10 +583,14 @@ class CaptureEngine:
                 for fn in listeners:
                     if local is not None and not self._check_local_policy(local):
                         break
-                    try:
-                        fn(aligned, starts, end_total)
-                    except Exception:  # noqa: BLE001
-                        log.exception("capture listener failed")
+                    admission = gate.capture_io() if gate is not None else nullcontext(True)
+                    with admission as allowed:
+                        if not allowed:
+                            break
+                        try:
+                            fn(aligned, starts, end_total)
+                        except Exception:  # noqa: BLE001
+                            log.exception("capture listener failed")
         except (OSError, ValueError):
             log.debug("capture pipe closed", exc_info=True)
         finally:

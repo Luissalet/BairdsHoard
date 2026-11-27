@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import ntpath
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Literal
 
@@ -38,7 +39,7 @@ class ScreenGate:
         self._display_present = display_present
         self._visible_apps = visible_apps
         self._lock = threading.Lock()
-        self._transport = threading.RLock()
+        self._capture_io = threading.Lock()
         self._blocked: BlockReason | None = None
 
     @property
@@ -51,18 +52,17 @@ class ScreenGate:
             if self._blocked is None:
                 self._blocked = reason if reason in BLOCK_REASONS else "policy_unavailable"
 
-    def read_transport(self, read: Callable[[int], bytes], size: int) -> bytes:
-        """Serialize the transport call with confirmation of a cutoff."""
-        with self._transport:
-            if self.blocked is not None:
-                return b""
-            return read(size)
+    @contextmanager
+    def capture_io(self) -> Iterator[bool]:
+        """Keep a local read or delivery ordered with confirmation of a cutoff."""
+        with self._capture_io:
+            yield self.blocked is None
 
     def confirm_revocation(self, timeout: float) -> None:
-        """Acknowledge only when no other thread can still start an authorized read."""
-        if not self._transport.acquire(timeout=timeout):
-            raise TimeoutError("The revoked screen transport has not stopped.")
-        self._transport.release()
+        """Acknowledge after all admitted capture work has left the gate."""
+        if not self._capture_io.acquire(timeout=timeout):
+            raise TimeoutError("The revoked screen capture still has pending work.")
+        self._capture_io.release()
 
     def check(self) -> BlockReason | None:
         blocked = self.blocked

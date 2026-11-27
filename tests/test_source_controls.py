@@ -382,6 +382,52 @@ def test_revocation_cuts_an_in_flight_read_before_acknowledging(rig, monkeypatch
     assert not delivered
 
 
+@pytest.mark.parametrize("reason", ["private", "excluded"])
+def test_revocation_stops_producer_before_confirming_an_admitted_delivery(rig, monkeypatch, reason):
+    client, svc, state = rig
+    assert choose(client).is_success and activate(client).is_success
+    engine = svc.engine
+    local = engine.local_source()
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    reads = iter((b"first", b"second", b""))
+    events = []
+
+    def receive(frame, *_):
+        if frame == b"second":
+            entered.set()
+            assert release.wait(8)
+        events.append(frame)
+
+    def revoke():
+        state.callbacks[0](reason)
+        events.append(b"acknowledged")
+
+    monkeypatch.setattr(engine.buffer, "feed", lambda data: (data, [0]))
+    monkeypatch.setattr(engine.buffer, "latest", lambda: (b"keyframe", 1))
+    engine.add_listener(receive)
+    proc = SimpleNamespace(stdout=SimpleNamespace(read1=lambda _size: next(reads)),
+                           poll=lambda: -15 if stopped.is_set() else None, terminate=stopped.set)
+    engine._proc, engine._proc_local = proc, local
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            pump = workers.submit(engine._pump, proc, {"got_data": False}, local)
+            try:
+                assert entered.wait(5)
+                revoked = workers.submit(revoke)
+                assert stopped.wait(3)
+                assert svc.sources.status()["blocked"] == reason and engine.snapshot()["state"] == "off"
+                with pytest.raises(TimeoutError):
+                    revoked.result(timeout=0.15)
+                assert not revoked.done()
+            finally:
+                release.set()
+            revoked.result(timeout=3)
+            pump.result(timeout=3)
+    finally:
+        engine._proc = engine._proc_local = None
+    assert events == [b"first", b"second", b"acknowledged"]
+
+
 @pytest.mark.parametrize(("reason", "blocked"), [
     ("private", "private"), ("excluded", "excluded"), (None, "policy_unavailable"),
 ])
