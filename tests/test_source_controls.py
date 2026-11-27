@@ -170,15 +170,21 @@ def test_old_remux_generation_cannot_enqueue_after_source_reset(rig, monkeypatch
 
 def test_privacy_supervisor_cuts_a_silent_producer(rig, monkeypatch, ts_bytes):
     client, svc, state = rig
-    waiting, stopped = threading.Event(), threading.Event()
+    waiting, stopped, release_frame = threading.Event(), threading.Event(), threading.Event()
+    frames = []
 
     class Stream(io.BytesIO):
         def read1(self, _size):
             data = self.read()
             if data:
+                frames.append("initial")
                 return data
             waiting.set()
-            return b"" if stopped.wait(5) else pytest.fail("Producer was left running after privacy changed")
+            assert release_frame.wait(5), "The test did not release the blocked producer"
+            if stopped.is_set():
+                return b""
+            frames.append("after cutoff")
+            return ts_bytes
 
     proc = SimpleNamespace(stdout=Stream(ts_bytes), stderr=io.BytesIO(), pid=101,
                            terminate=stopped.set, poll=lambda: -15 if stopped.is_set() else None,
@@ -195,14 +201,40 @@ def test_privacy_supervisor_cuts_a_silent_producer(rig, monkeypatch, ts_bytes):
         assert engine.snapshot()["state"] == "running" and engine.buffer.latest()[1]
         state.policy = ScreenPolicy(True, ())
         # The supervisor has to stop the producer before another byte or a picture request.
-        assert stopped.wait(2)
+        try:
+            assert stopped.wait(2)
+        finally:
+            release_frame.set()
         status = client.get("/api/status").json()
+        assert frames == ["initial"]
         assert status["capture"]["state"] == "off" and status["capture"]["buffered_seconds"] == 0
         assert status["source"]["blocked"] == "private"
         assert call(client, svc, "screen_look", {"save": False}).json()["code"] == "no_signal"
         assert client.post("/api/snapshot").status_code == 409
         assert client.post("/api/clip").status_code == 409
         assert client.post("/api/record/start").status_code == 409
+
+
+def test_private_policy_blocks_the_first_local_read(rig):
+    client, svc, state = rig
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine = svc.engine
+    reads = []
+
+    def frame(_):
+        reads.append("frame")
+        return b""
+
+    proc = SimpleNamespace(stdout=SimpleNamespace(read1=frame))
+    engine._proc = proc
+    try:
+        state.policy = ScreenPolicy(True, ())
+        engine._pump(proc, {"got_data": False}, engine.local_source())
+    finally:
+        engine._proc = None
+    assert reads == []
+    assert svc.sources.status()["blocked"] == "private"
 
 
 def test_picture_request_rechecks_policy_even_with_recent_data(rig, monkeypatch, ts_bytes):

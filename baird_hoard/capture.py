@@ -230,6 +230,7 @@ class CaptureEngine:
 
     def wait_for_picture(self) -> None:
         """Wait for a pending opening, for up to twelve seconds."""
+        self.require_local_policy(self.local_source())
         deadline = time.monotonic() + 12
         with self._changed:
             while self._wanted() and not self._stop.is_set():
@@ -505,6 +506,8 @@ class CaptureEngine:
         ready = False
         try:
             while True:
+                if local is not None and not self._check_local_policy(local, fresh=not ready):
+                    break
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 if not chunk:
                     break
