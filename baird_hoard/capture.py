@@ -164,6 +164,11 @@ class CaptureEngine:
             self.state.update(state="idle", message="", device="", input=None, kbps=0, since=None, audio=False)
             self.settings_changed(reopen=True)
         self._terminate_local_process(proc)
+        if previous is not None and previous.gate is not None:
+            try:
+                previous.gate.confirm_revocation(KILL_GRACE_S)
+            except TimeoutError as exc:
+                raise BairdError("capture_unavailable", SOURCE_STUCK_MESSAGE, status=503) from exc
 
     def _wanted(self) -> bool:
         if self._local_source is not None:
@@ -495,22 +500,24 @@ class CaptureEngine:
                 self._set(state="error", message=f"The capture helper stopped (code {code}).", kbps=0, since=None)
         return True
 
-    def revoke_local_source(self, gate: ScreenGate, reason: BlockReason | None) -> None:
-        """Latch a cutoff and wake the supervisor even if a pipe or policy read is stalled."""
+    def revoke_local_source(self, gate: ScreenGate, reason: BlockReason | None, *, confirm: bool = True) -> None:
+        """Close the scoped producer before waiting for its authorized read to drain."""
+        proc = None
         with self._changed:
             gate.block(reason)
             local = self._local_source
-            if local is None or local.gate is not gate:
-                return
-            proc = self._proc if self._proc_local is local else None
-            self._local_source = LocalSource()
-            self.buffer.reset()
-            self.state.update(state="off", message="Screen capture is off.", device="", input=None,
-                              kbps=0, since=None, audio=False)
-            self._restart.set()
-            self._wake.set()
-            self._changed.notify_all()
+            if local is not None and local.gate is gate:
+                proc = self._proc if self._proc_local is local else None
+                self._local_source = LocalSource()
+                self.buffer.reset()
+                self.state.update(state="off", message="Screen capture is off.", device="", input=None,
+                                  kbps=0, since=None, audio=False)
+                self._restart.set()
+                self._wake.set()
+                self._changed.notify_all()
         self._terminate_local_process(proc)
+        if confirm:
+            gate.confirm_revocation(KILL_GRACE_S)
 
     @staticmethod
     def _terminate_local_process(proc: subprocess.Popen | None) -> None:
@@ -529,7 +536,7 @@ class CaptureEngine:
                 return False
             reason = gate.check()
             if reason is not None:
-                self.revoke_local_source(gate, reason)
+                self.revoke_local_source(gate, reason, confirm=False)
                 return False
             return self.local_source() is local
 
@@ -541,9 +548,14 @@ class CaptureEngine:
         ready = False
         try:
             while True:
-                if local is not None and not self._check_local_policy(local):
-                    break
-                chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
+                if local is None:
+                    chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
+                else:
+                    read = getattr(out, "read1", None) or out.read
+                    gate = local.gate
+                    if gate is None or not self._check_local_policy(local):
+                        break
+                    chunk = gate.read_transport(read, 65536)
                 if not chunk:
                     break
                 if local is not None and not self._check_local_policy(local):
@@ -566,7 +578,7 @@ class CaptureEngine:
                 with self._lock:
                     listeners = list(self._listeners)
                 for fn in listeners:
-                    if local is not None and self.local_source() is not local:
+                    if local is not None and not self._check_local_policy(local):
                         break
                     try:
                         fn(aligned, starts, end_total)

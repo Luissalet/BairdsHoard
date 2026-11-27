@@ -38,6 +38,7 @@ class ScreenGate:
         self._display_present = display_present
         self._visible_apps = visible_apps
         self._lock = threading.Lock()
+        self._transport = threading.RLock()
         self._blocked: BlockReason | None = None
 
     @property
@@ -49,6 +50,19 @@ class ScreenGate:
         with self._lock:
             if self._blocked is None:
                 self._blocked = reason if reason in BLOCK_REASONS else "policy_unavailable"
+
+    def read_transport(self, read: Callable[[int], bytes], size: int) -> bytes:
+        """Serialize the transport call with confirmation of a cutoff."""
+        with self._transport:
+            if self.blocked is not None:
+                return b""
+            return read(size)
+
+    def confirm_revocation(self, timeout: float) -> None:
+        """Acknowledge only when no other thread can still start an authorized read."""
+        if not self._transport.acquire(timeout=timeout):
+            raise TimeoutError("The revoked screen transport has not stopped.")
+        self._transport.release()
 
     def check(self) -> BlockReason | None:
         blocked = self.blocked

@@ -248,6 +248,7 @@ def test_private_policy_blocks_the_first_local_read(rig):
 ])
 def test_policy_change_between_reads_blocks_next_frame(rig, monkeypatch, changed_policy, blocked):
     client, svc, state = rig
+    monkeypatch.setattr(svc.sources, "_subscribe_policy", None)
     assert choose(client).status_code == 200
     assert activate(client).json()["active"]
     engine = svc.engine
@@ -261,12 +262,14 @@ def test_policy_change_between_reads_blocks_next_frame(rig, monkeypatch, changed
     def receive(frame, *_):
         delivered.append(frame)
         # Change the authority after the first ready frame, in the same pump turn.
-        # No subscription callback or watchdog tick is needed to deny the next read.
+        # The next listener and next read both need a fresh permission check.
         state.policy = changed_policy
 
     monkeypatch.setattr(engine.buffer, "feed", lambda data: (data, [0]))
     monkeypatch.setattr(engine.buffer, "latest", lambda: (b"keyframe", 1))
     engine.add_listener(receive)
+    engine.add_listener(lambda frame, *_: delivered.append(frame))
+    assert not state.callbacks
     proc = SimpleNamespace(stdout=SimpleNamespace(read1=read_frame))
     engine._proc = proc
     try:
@@ -277,6 +280,106 @@ def test_policy_change_between_reads_blocks_next_frame(rig, monkeypatch, changed
     assert delivered == [b"frame-\x01"]
     assert svc.sources.status()["blocked"] == blocked
     assert not svc.sources.status()["active"]
+
+
+@pytest.mark.parametrize(("policy", "reason"), [
+    (ScreenPolicy(True, ()), "private"), (ScreenPolicy(False, ("math.exe",)), "excluded"),
+])
+def test_confirmed_revocation_prevents_a_pending_transport_call(rig, monkeypatch, policy, reason):
+    client, svc, state = rig
+    assert choose(client).is_success and activate(client).is_success
+    engine = svc.engine
+    local = engine.local_source()
+    next_read = threading.Event()
+    dispatch, resume, stopped = threading.Event(), threading.Event(), threading.Event()
+    reads, delivered = [], []
+
+    def read_frame(_):
+        reads.append(state.policy)
+        return b"frame"
+
+    class Transport:
+        @property
+        def read1(self):
+            if delivered:
+                next_read.set()
+            return read_frame
+
+    check = engine._check_local_policy
+
+    def checked_to_read(source):
+        allowed = check(source)
+        if allowed and next_read.is_set() and not dispatch.is_set():
+            dispatch.set()
+            assert resume.wait(8)
+        return allowed
+
+    monkeypatch.setattr(engine, "_check_local_policy", checked_to_read)
+    monkeypatch.setattr(engine.buffer, "feed", lambda data: (data, [0]))
+    monkeypatch.setattr(engine.buffer, "latest", lambda: (b"keyframe", 1))
+    engine.add_listener(lambda frame, *_: delivered.append(frame))
+    proc = SimpleNamespace(stdout=Transport(), poll=lambda: -15 if stopped.is_set() else None,
+                           terminate=stopped.set)
+    engine._proc, engine._proc_local = proc, local
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            pump = workers.submit(engine._pump, proc, {"got_data": False}, local)
+            try:
+                assert dispatch.wait(5)
+                state.policy = policy
+                workers.submit(state.callbacks[0], reason).result(timeout=3)
+                assert stopped.is_set() and svc.sources.status()["blocked"] == reason
+            finally:
+                resume.set()
+            pump.result(timeout=3)
+    finally:
+        engine._proc = engine._proc_local = None
+    assert reads == [ScreenPolicy(False, ())] and delivered == [b"frame"]
+
+
+@pytest.mark.parametrize(("reason", "times_out"), [("private", False), ("excluded", False), ("private", True)])
+def test_revocation_cuts_an_in_flight_read_before_acknowledging(rig, monkeypatch, reason, times_out):
+    client, svc, state = rig
+    assert choose(client).is_success and activate(client).is_success
+    engine = svc.engine
+    local = engine.local_source()
+    entered, release, stopped = threading.Event(), threading.Event(), threading.Event()
+    delivered = []
+    if times_out:
+        monkeypatch.setattr("baird_hoard.capture.KILL_GRACE_S", 0.01)
+
+    def read(_):
+        entered.set()
+        assert release.wait(8)
+        return b"bytes still in the pipe"
+
+    engine.add_listener(lambda frame, *_: delivered.append(frame))
+    proc = SimpleNamespace(stdout=SimpleNamespace(read1=read),
+                           poll=lambda: -15 if stopped.is_set() else None, terminate=stopped.set)
+    engine._proc, engine._proc_local = proc, local
+    try:
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            pump = workers.submit(engine._pump, proc, {"got_data": False}, local)
+            try:
+                assert entered.wait(5)
+                revoked = workers.submit(state.callbacks[0], reason)
+                assert stopped.wait(3)
+                if times_out:
+                    with pytest.raises(TimeoutError):
+                        revoked.result(timeout=3)
+                    assert revoked.done()
+                else:
+                    assert not revoked.done()
+                assert svc.sources.status()["blocked"] == reason and engine.snapshot()["state"] == "off"
+                assert engine.buffer.latest() == (b"", 0)
+            finally:
+                release.set()
+            if not times_out:
+                revoked.result(timeout=3)
+            pump.result(timeout=3)
+    finally:
+        engine._proc = engine._proc_local = None
+    assert not delivered
 
 
 @pytest.mark.parametrize(("reason", "blocked"), [

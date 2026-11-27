@@ -97,9 +97,11 @@ class SourceControls:
             if choice.mode == "hdmi":
                 raise BairdError("invalid", "The capture card uses the capture setting.")
             if not active:
-                self._engine.select_local_source()
-                self._close_policy_subscription()
-                self._gate = None
+                try:
+                    self._engine.select_local_source()
+                finally:
+                    self._close_policy_subscription()
+                    self._gate = None
                 return self.status()
             if self._engine.source_enabled():
                 return self.status()
@@ -137,7 +139,7 @@ class SourceControls:
     def close(self) -> None:
         with self._lock:
             if self._gate is not None:
-                self._engine.revoke_local_source(self._gate, None)
+                self._engine.revoke_local_source(self._gate, None, confirm=False)
             self._close_policy_subscription()
 
     def _close_policy_subscription(self) -> None:
@@ -156,11 +158,13 @@ class SourceControls:
         self._check_recording()
         self._selection = choice
         self._gate = None
-        if choice.mode == "hdmi":
-            self._engine.restore_default_source()
-        else:
-            self._engine.select_local_source()
-        self._close_policy_subscription()
+        try:
+            if choice.mode == "hdmi":
+                self._engine.restore_default_source()
+            else:
+                self._engine.select_local_source()
+        finally:
+            self._close_policy_subscription()
 
     def _displays(self) -> Sequence[Display]:
         if self._backend is not None:
