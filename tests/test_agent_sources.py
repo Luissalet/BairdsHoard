@@ -400,6 +400,32 @@ def test_pending_clip_never_reaches_library(rendered_picture, monkeypatch, pipel
     assert not list(svc.config.work_dir.glob("clip-*.ts"))
 
 
+def test_clip_committed_before_revocation_returns_the_saved_clip(rendered_picture, monkeypatch):
+    client, svc = rendered_picture
+    monkeypatch.setattr(svc.buffer, "since", lambda seconds: [b"synthetic-transport"])
+    monkeypatch.setattr(svc.buffer, "seconds_kept", lambda: 1.0)
+    monkeypatch.setattr(svc.library, "wants_enhanced", lambda: False)
+    monkeypatch.setattr(svc.library, "_probe", lambda path: {"duration": 1.0})
+
+    def mux(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"synthetic-mp4")
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    clip = svc.library.clip
+
+    def revoke_after_publication(seconds):
+        saved = clip(seconds)
+        svc.apply_settings({"capture_enabled": False})
+        return saved
+
+    monkeypatch.setattr(svc.library, "_run", mux)
+    monkeypatch.setattr(svc.library, "clip", revoke_after_publication)
+    response = agent(client, "clip_save", {"seconds": 1})
+    assert response.status_code == 200, response.text
+    assert Path(response.json()["path"]).read_bytes() == b"synthetic-mp4"
+    assert not svc.settings["capture_enabled"]
+
+
 @pytest.mark.parametrize("url", [None, "/copilot/look.jpg"])
 def test_pending_look_never_repopulates_revoked_cache(rendered_picture, monkeypatch, url):
     client, svc = rendered_picture

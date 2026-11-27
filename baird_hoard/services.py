@@ -76,7 +76,8 @@ class Services:
         self.hotkeys = HotkeyHelper(config.data_dir / "hotkeys-status.json", config.port)
         self.copilot = Copilot(engine=self.engine, library=self.library, settings=self.settings, reader=TextReader(),
                                ffmpeg=self.ffmpeg, work_dir=config.work_dir)
-        self.library.capture_publication = self.copilot.capture_publication = lambda: capture_publication(self)
+        self.library.capture_publication = lambda *, finalizes_call=False: capture_publication(self, finalizes_call=finalizes_call)
+        self.copilot.capture_publication = lambda: capture_publication(self)
         self.started = time.time()
 
     def start(self) -> None:

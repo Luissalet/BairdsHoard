@@ -58,32 +58,35 @@ def _focus(svc, expected: SourceArgs | None, live: bool) -> tuple:
     return mode, monitor, state.get("revision")
 
 
-@dataclass(frozen=True)
+@dataclass
 class SourcePermit:
     services: Any
     expected: SourceArgs | None
     focus: tuple
+    committed: bool = field(init=False, default=False)
 
     def check(self) -> None:
         if _focus(self.services, self.expected, True) != self.focus:
             raise BairdError("source_changed", "The source changed during the request. Look again.", status=409)
 
     @contextmanager
-    def publish(self):
+    def publish(self, *, finalizes_call: bool):
         with self.services.sources.lock:
             self.check()
             yield
+            if finalizes_call:
+                self.committed = True
 
 
 _live_permit: ContextVar[SourcePermit | None] = ContextVar("live_source_permit", default=None)
 
 
-def capture_publication(svc):
-    """Take the call's permit before rendering. Hold its lock only while publishing."""
+def capture_publication(svc, *, finalizes_call: bool = False):
+    """Take the original permit and hold its lock only while publishing."""
     permit = _live_permit.get()
     if permit is None or permit.services is not svc:
         permit = SourcePermit(svc, None, _focus(svc, None, True))
-    return permit.publish()
+    return permit.publish(finalizes_call=finalizes_call)
 
 
 def call_on_source(svc, expected: SourceArgs | None, run: Callable[[], Any], *, live: bool = True) -> Any:
@@ -95,7 +98,8 @@ def call_on_source(svc, expected: SourceArgs | None, run: Callable[[], Any], *, 
     token = _live_permit.set(permit)
     try:
         result = run()
-        permit.check()
+        if not permit.committed:
+            permit.check()
         return result
     finally:
         _live_permit.reset(token)

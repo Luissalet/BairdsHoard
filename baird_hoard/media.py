@@ -64,7 +64,7 @@ class Library:
         self._index: dict[str, dict[str, Any]] = read_json(config.index_path, default={}) or {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self.recorder = Recorder(self)
-        self.capture_publication = nullcontext
+        self.capture_publication = lambda *, finalizes_call=False: nullcontext()
         # Hooks the services set: a new screenshot exists / a file was renamed / a file was deleted.
         self.on_new_image: Optional[Any] = None
         self.on_rename: Optional[Any] = None
@@ -343,7 +343,7 @@ class Library:
 
     def clip(self, seconds: Optional[float] = None) -> dict[str, Any]:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
-        publication = self.capture_publication()
+        publication = self.capture_publication(finalizes_call=True)
         with self.engine.request():
             self.engine.wait_for_picture()
             ff = self._need_ffmpeg()
