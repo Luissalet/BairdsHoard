@@ -17,11 +17,44 @@ from baird_hoard.config import Config
 from baird_hoard.main import create_app
 from baird_hoard.monitor_input import feed_samples
 from baird_hoard.monitor_privacy import configured_policy
-from baird_hoard.monitor_source import worker_command
+from baird_hoard.monitor_source import MonitorSource, worker_command
 from baird_hoard.services import Services
 
 from .test_monitor_privacy import HubDouble
 from .test_monitor_source import MONITOR, confirm_test_shortcut, set_local_capture
+
+
+def test_confirmed_private_cut_replaces_temporary_policy_unavailable(monkeypatch, tmp_path):
+    hub = HubDouble()
+    authority = ModuleType("monitor_cutoff_test_hub")
+    authority.connect = lambda: hub
+    monkeypatch.setitem(sys.modules, authority.__name__, authority)
+    config = Config(data_dir=tmp_path, port=17697, data_dir_configured=True,
+                    monitor_capture=True, isolated_instance=True, background=False)
+    monitor = MonitorSource("double-ffmpeg", tmp_path, inventory=lambda: [MONITOR],
+                            policy_provider=f"{authority.__name__}:connect")
+    svc = Services(config, monitor_source=monitor, confirm_capture=confirm_test_shortcut)
+    with TestClient(create_app(config, svc), base_url="http://127.0.0.1:17697", client=("127.0.0.1", 50000)) as client:
+        svc.sources.select("monitor", MONITOR.id)
+        set_local_capture(client, True)
+        local = svc.engine.local_source()
+        read = hub.read
+        monkeypatch.setattr(hub, "read", lambda *_: None)
+        assert not svc.engine._check_local_policy(local)
+        assert client.get("/api/status").json()["source"]["blocked"] == "policy_unavailable"
+
+        monkeypatch.setattr(hub, "read", read)
+        hub.change(private=True)
+        source = client.get("/api/status").json()["source"]
+        assert source["blocked"] == "privacy_blocked" and not source["active"]
+        response = client.post("/api/agent/call", headers={"Authorization": f"Bearer {svc.token}"},
+                               json={"name": "screen_look", "arguments": {"save": False}})
+        assert response.status_code == 409 and response.json()["code"] == "privacy_blocked"
+        assert svc.engine.buffer.latest() == (b"", 0)
+
+        hub.change(private=False)
+        source = client.get("/api/status").json()["source"]
+        assert source["blocked"] == "privacy_blocked" and not source["active"]
 
 
 @pytest.mark.parametrize(("policy_change", "cutoff"), [

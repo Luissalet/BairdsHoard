@@ -52,8 +52,16 @@ class ScreenGate:
 
     def block(self, reason: BlockReason | None) -> None:
         with self._lock:
-            if self._blocked is None:
+            if self._blocked is None or (self._blocked == "policy_unavailable" and reason in ("private", "excluded")):
                 self._blocked = reason if reason in BLOCK_REASONS else "policy_unavailable"
+
+    def refresh_cutoff(self) -> BlockReason | None:
+        """Resolve a fail-closed cutoff after the scoped authority settles."""
+        if self.blocked == "policy_unavailable":
+            reason = self._read_block_reason()
+            if reason in ("private", "excluded"):
+                self.block(reason)
+        return self.blocked
 
     @contextmanager
     def capture_io(self) -> Iterator[bool]:
@@ -71,7 +79,9 @@ class ScreenGate:
                 except Exception:
                     allowed = False
                 if allowed is not True:
+                    held.close()
                     self.block(None)
+                    self.refresh_cutoff()
             yield self.blocked is None
 
     def confirm_revocation(self, timeout: float) -> None:
@@ -85,14 +95,17 @@ class ScreenGate:
         if blocked is not None:
             return blocked
         # A revocation can set the latch even when an authority read is in progress.
-        try:
-            reason = self._check()
-        except Exception:
-            log.debug("Screen policy could not be checked", exc_info=True)
-            reason = "policy_unavailable"
+        reason = self._read_block_reason()
         if reason is not None:
             self.block(reason)
         return self.blocked
+
+    def _read_block_reason(self) -> BlockReason | None:
+        try:
+            return self._check()
+        except Exception:
+            log.debug("Screen policy could not be checked", exc_info=True)
+            return "policy_unavailable"
 
     def _check(self) -> BlockReason | None:
         policy = self._read_policy()

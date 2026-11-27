@@ -76,6 +76,8 @@ class SourceControls:
             choice = self._selection
             monitors = self._displays() if list_displays or choice.mode != "hdmi" else ()
             block = self._gate.blocked if self._gate else None
+            if block == "policy_unavailable" and self._backend.read_scoped is not None:
+                block = self._gate.refresh_cutoff()
             if choice.monitor and not any(display.id == choice.monitor and display.layout == choice.layout for display in monitors):
                 block = block or "missing_display"
             return {
