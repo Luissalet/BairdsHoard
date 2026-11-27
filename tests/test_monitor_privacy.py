@@ -157,10 +157,12 @@ def test_revision_cutoff_serializes_with_an_inflight_acquisition():
     assert sequence == ["covered frame", "cutoff"]
 
 
-def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
+def test_feeder_stops_repeating_when_desktop_policy_is_revoked():
     hub = HubDouble()
-    gate = guard(hub)
+    blocked = threading.Event()
+    gate = AcquisitionGate(hub, choose(MONITOR, [MONITOR]), on_block=lambda _: blocked.set())
     frames_taken = []
+    pulls_at_cutoff = []
     out = io.BytesIO()
 
     class Pcm:
@@ -170,6 +172,8 @@ def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
             self.reads += 1
             if self.reads == 2:
                 hub.change(excluded=True)
+                pulls_at_cutoff.extend(frames_taken)
+                assert blocked.wait(4)
             return bytes(n)
 
     @contextmanager
@@ -181,7 +185,7 @@ def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
 
     with pytest.raises(BairdError) as error:
         feed_samples(out, Pcm(), MONITOR, (8, 8), frames, gate, threading.Event(), 30, 2)
-    assert error.value.code == "application_excluded" and frames_taken == ["acquired"]
+    assert error.value.code == "application_excluded" and frames_taken == pulls_at_cutoff
     assert out.getvalue().count(b"00db") == 1
 
 
