@@ -28,6 +28,7 @@ HARDWARE = {0x10DE: "h264_nvenc", 0x1002: "h264_amf", 0x8086: "h264_qsv"}
 LAYOUT_POLL_S = 0.75
 START_TIMEOUT_S = 9.0
 TRANSPORT_FLUSH_S = 0.10
+_EVENT_LOCK = threading.Lock()
 
 
 class EncoderStartError(RuntimeError):
@@ -35,8 +36,9 @@ class EncoderStartError(RuntimeError):
 
 
 def emit(kind: str, **data):
-    sys.stderr.write(json.dumps({"event": kind, **data}, ensure_ascii=True) + "\n")
-    sys.stderr.flush()
+    with _EVENT_LOCK:
+        sys.stderr.write(json.dumps({"event": kind, **data}, ensure_ascii=True) + "\n")
+        sys.stderr.flush()
 
 
 def encoder_order(monitor: DesktopMonitor, available: set[str]) -> list[str]:
@@ -135,14 +137,14 @@ def _terminate(proc):
         proc.wait(timeout=2)
 
 
-def _drain(lines: BinaryIO, tail: deque, levels: dict | None = None):
+def _drain(lines: BinaryIO, tail: deque, report_levels=False):
     for raw in lines:
         line = raw.decode("utf-8", "replace").strip()
-        if levels is not None and line.startswith('{"event":"levels"'):
+        if report_levels and line.startswith('{"event":"levels"'):
             try:
                 data = json.loads(line)
-                levels.update(audio_level=data["audio_level"], microphone_level=data["microphone_level"],
-                              level_monotonic=time.monotonic())
+                emit("levels", audio_level=data["audio_level"], microphone_level=data["microphone_level"],
+                     level_monotonic=data.get("level_monotonic", time.monotonic()))
                 continue
             except (KeyError, ValueError):
                 pass
@@ -161,13 +163,12 @@ class EncoderAttempt:
         self.feed_error: Exception | None = None
         self.feeder: threading.Thread | None = None
         self.pcm: AudioBlocks | None = None
-        self.levels = grants.levels if grants is not None else {}
         self.readers = [
             threading.Thread(target=self._read, daemon=True),
             threading.Thread(target=_drain, args=(video.stderr, self.video_errors), daemon=True),
         ]
         if grants is None:
-            self.readers.append(threading.Thread(target=_drain, args=(audio.stderr, self.audio_errors, self.levels), daemon=True))
+            self.readers.append(threading.Thread(target=_drain, args=(audio.stderr, self.audio_errors, True), daemon=True))
         for reader in self.readers:
             reader.start()
 
@@ -278,6 +279,7 @@ def open_guarded_encoder(audio_command, command, monitor, frames, dimensions, ga
         raise
     bind_to_app(video)
     grants = AudioGrants(audio, gate)
+    grants.on_levels = emit
     session = EncoderAttempt(audio, video, grants)
     try:
         session.start_feeder(monitor, frames, dimensions, gate, microphone)
@@ -346,7 +348,7 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
         if started:
             if now >= next_stats:
                 elapsed = now - (next_stats - 1.0)
-                event("stats", kbps=round(bytes_sent * 8 / (elapsed * 1000)), **session.levels)
+                event("stats", kbps=round(bytes_sent * 8 / (elapsed * 1000)))
                 next_stats, bytes_sent = now + 1.0, 0
         elif now >= deadline or len(pending) >= 4 * 1024 * 1024:
             raise EncoderStartError(session.failure())

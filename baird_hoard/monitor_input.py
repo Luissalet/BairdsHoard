@@ -179,7 +179,7 @@ class AudioGrants:
         self.audio = audio
         self.gate = gate
         self.messages: queue.Queue[bytes] = queue.Queue()
-        self.levels: dict = {}
+        self.on_levels = None
         self.failure: Exception | None = None
         self.threads = [threading.Thread(target=self._read, daemon=True),
                         threading.Thread(target=self._serve, daemon=True)]
@@ -192,10 +192,10 @@ class AudioGrants:
                 message = line.strip()
                 if message in (b"@acquire", b"@complete"):
                     self.messages.put(message)
-                elif message.startswith(b'{"event":"levels"'):
+                elif self.on_levels is not None and message.startswith(b'{"event":"levels"'):
                     event = json.loads(message)
-                    self.levels.update(audio_level=event["audio_level"], microphone_level=event["microphone_level"],
-                                       level_monotonic=time.monotonic())
+                    self.on_levels("levels", audio_level=event["audio_level"], microphone_level=event["microphone_level"],
+                                   level_monotonic=event.get("level_monotonic", time.monotonic()))
         except (OSError, ValueError, KeyError):
             pass
         finally:
