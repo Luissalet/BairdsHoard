@@ -42,20 +42,22 @@ def avi_header(width: int, height: int, fps: int, channels: int) -> bytes:
 class DesktopSampler:
     """Keep the latest desktop frame independently of the PCM clock."""
 
-    def __init__(self, monitor, frame_bytes, frames, gate, fps):
+    def __init__(self, monitor, frame_bytes, frames, gate, fps, capture_stopped):
         self.packet = _chunk(b"00db", bytes(frame_bytes))
         self.error: Exception | None = None
         self.ready = threading.Event()
         self.stop = threading.Event()
-        self.thread = threading.Thread(target=self._sample, args=(monitor, frame_bytes, frames, gate, fps),
+        self.thread = threading.Thread(target=self._sample, args=(monitor, frame_bytes, frames, gate, fps, capture_stopped),
                                        name="baird-desktop-sampler", daemon=True)
 
-    def _sample(self, monitor, frame_bytes, frames, gate, fps):
+    def _sample(self, monitor, frame_bytes, frames, gate, fps, capture_stopped):
         try:
+            if capture_stopped.is_set():
+                return
             with ExitStack() as owned:
                 grab = gate.acquire("video", lambda: owned.enter_context(frames(monitor)))
                 period = 1 / fps
-                while not self.stop.is_set():
+                while not (self.stop.is_set() or capture_stopped.is_set()):
                     started = time.monotonic()
                     picture = gate.acquire("video", grab)
                     if picture is not None:
@@ -79,7 +81,7 @@ def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
     width, height = size
     frame_bytes = width * height * 4
     samples = AUDIO_RATE // fps * channels * 2
-    desktop = DesktopSampler(monitor, frame_bytes, frames, gate, fps)
+    desktop = DesktopSampler(monitor, frame_bytes, frames, gate, fps, stop)
     desktop.thread.start()
     try:
         while not desktop.ready.wait(0.05):
@@ -90,8 +92,9 @@ def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
             audio = pcm.read(samples)
             if desktop.error is not None:
                 raise desktop.error
-            if len(audio) != samples:
+            if stop.is_set() or len(audio) != samples:
                 return
+            gate.check()
             # The helper emits clocked, continuous PCM, including source silence.
             # Pair every block with the last frame, even when DXGI has no update.
             sink.write(desktop.packet)

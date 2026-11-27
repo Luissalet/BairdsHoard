@@ -143,6 +143,7 @@ class AcquisitionGate:
         self.acquire("audio", lambda: None)
 
     def check(self) -> None:
-        with self._lock:
-            if self._blocked is not None:
-                raise self._error(self._blocked)
+        # This observes the terminal latch; acquisition still takes the lock and a fresh lease.
+        blocked = self._blocked
+        if blocked is not None:
+            raise self._error(blocked)
