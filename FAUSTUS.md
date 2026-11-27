@@ -1,12 +1,12 @@
 # Baird's Hoard — what it can and cannot do
 
-App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` (40 tools, images as MCP image
-content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus with *Add* on the discovered app).
+App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.py` with images as MCP image content. Connector preset: its own `faustus-plugin.json` (adopted from Faustus with *Add* on the discovered app).
 
 ## Can
 
 - Show another computer's screen live (HDMI → AVerMedia GL310 / C875) in the Hoard window or a browser tab, with
   sound, < 1 s delay, no re-encoding.
+- With the monitor profile enabled, show an explicitly selected local display with system loopback and optional microphone. `source_list` reports the choice, activation and available identities. `source_select` stages a choice and `source_undo` restores the previous choice with a local display off. The person activates the selected display with the switch in Baird's Settings and the Windows shortcut it shows. Revocation discards pending snapshots, clips and copilot looks. Capture, recording and copilot accept an optional `source` object to check the expected source.
 - Screenshot of the current frame (PNG/JPG) — button, key `C`, `snapshot_save`, or `screen_look` (returns the image
   to the assistant; `save=false` leaves no file).
 - Save the last N seconds (default 30, up to the memory window of 10–600 s) as MP4 instantly — `B`, `clip_save`.
@@ -90,7 +90,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Files: `Videos\Baird` (setting `media_dir`). Data: `data/` (settings, media index, thumbnails, logs, `mcp-token`).
 - Native helper: `native/bairdcap.cs` → `bairdcap.exe` (built on first start with the Windows C# compiler). Screen text for the
   copilot: `native/bairdocr.ps1` (Windows PowerShell 5.1 and `Windows.Media.Ocr`; started on first use, stopped when idle).
-- Hardware notes are in `docs/DEVICE.md`. The capture contract, monitor selection, loopback and optional microphone track are in `docs/CAPTURE_SOURCES.md`.
+- Hardware notes are in `docs/DEVICE.md`. The capture contract, monitor selection, loopback and optional microphone track are in `docs/CAPTURE_SOURCES.md`. The agent API and selector and overlay integration points are in `docs/AGENT_SOURCES.md`.
 
 ## Skills for the agents that connect
 

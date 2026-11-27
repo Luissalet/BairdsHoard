@@ -155,6 +155,7 @@ class CaptureEngine:
                     self._needs_selection = False
                     self._retry_at = 0.0
                     self._retry_step = 0
+                    self.buffer.reset()
             if self._privacy_block is not None and not self.settings["capture_enabled"]:
                 self._privacy_block = None
                 self.state.update(state="idle", message="", privacy=None)
@@ -185,6 +186,12 @@ class CaptureEngine:
             elif self._privacy_block is not None:
                 code, message = self._privacy_block
                 out.update(state="privacy_blocked", privacy=code, message=message, input=None, kbps=0, audio=False)
+            elif self._needs_selection and out["state"] != "reselect":
+                out.update(state="reselect", message="Choose a monitor again.")
+            elif self._demand_only and self._restart.is_set():
+                out.update(state="starting", message="Changing the capture source.")
+            elif out["state"] == "reselect" and not self._needs_selection:
+                out.update(state="idle", message="")
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
@@ -470,7 +477,8 @@ class CaptureEngine:
                 if not chunk or self._proc is not proc:
                     break
                 with self._lock if self._demand_only else nullcontext():
-                    if self._privacy_block is not None:
+                    if self._demand_only and (self._privacy_block is not None or self._restart.is_set()
+                                              or not self.settings["capture_enabled"]):
                         continue
                     aligned, starts = self.buffer.feed(chunk)
                 if not aligned:

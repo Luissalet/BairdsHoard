@@ -29,6 +29,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict, deque
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -383,6 +384,7 @@ class Copilot:
         self.background = background            # False: nobody ticks (tests drive _tick themselves)
         self.frames = frames if frames is not None else FrameTap(engine, ffmpeg, clock=clock)
         self._cond = threading.Condition(threading.RLock())
+        self.capture_publication = nullcontext
         self._session: Optional[_Session] = None
         self._events: deque[dict[str, Any]] = deque(maxlen=300)
         self._seq = 0
@@ -664,6 +666,7 @@ class Copilot:
     def look(self, *, max_side: Optional[int] = None, region: Any = None, text: bool = False, image: bool = True) -> dict[str, Any]:
         """The picture now, small enough to be cheap, and the space the assistant's coordinates are read in from now on.
         ``region`` ([x, y, w, h] in the current space) zooms; ``text`` adds every text on screen with its place."""
+        publication = self.capture_publication()
         cfg = self._require_enabled()
         side = int(min(max(int(max_side or cfg["look_side"]), 320), 2048))
         view = (0.0, 0.0, 1.0, 1.0)
@@ -683,7 +686,7 @@ class Copilot:
         if not image:
             scale = min(1.0, side / max(picture[0] * view[2], picture[1] * view[3]))
             width, height = max(1, round(picture[0] * view[2] * scale)), max(1, round(picture[1] * view[3] * scale))
-        with self._cond:
+        with publication, self._cond:
             look_id = uuid.uuid4().hex[:6]
             self._looks[look_id] = {"view": view, "size": (width, height), "jpeg": jpeg, "at": self.clock()}
             while len(self._looks) > LOOK_KEEP:
@@ -701,6 +704,11 @@ class Copilot:
         if image:
             out["_image"] = {"data": base64.b64encode(jpeg).decode("ascii"), "mime": "image/jpeg"}
         return out
+
+    def clear_looks(self) -> None:
+        with self._cond:
+            self._looks.clear()
+            self._last_look = None
 
     def look_image(self, look_id: str) -> bytes:
         with self._cond:

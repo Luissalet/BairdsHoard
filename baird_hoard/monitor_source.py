@@ -92,9 +92,12 @@ class MonitorSource:
                 for m in monitors if counts[m.id] == 1]
 
     def command(self, settings: Settings) -> list[str]:
+        return self.command_for(settings["monitor"], settings)
+
+    def command_for(self, selection: dict[str, str] | None, settings: Settings) -> list[str]:
+        """Open the display bound by the active source controller."""
         if not self.ffmpeg:
             raise BairdError("unavailable", "FFmpeg is required for monitor capture.")
-        selection = settings["monitor"]
         if selection is None:
             raise BairdError("monitor_reselect", "Choose a monitor to start capture.", status=409)
         selected_monitor(selection, self.inventory())

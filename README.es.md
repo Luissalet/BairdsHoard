@@ -73,6 +73,7 @@ El Hub arranca y para la app desde su ficha, y el manifiesto `faustus-plugin.jso
 
 | Grupo | Herramientas |
 |---|---|
+| Fuentes | `source_list`, `source_select`, `source_undo` |
 | Captura | `capture_status`, `screen_look`, `snapshot_save`, `clip_save`, `record_start`, `record_pause`, `record_resume`, `record_stop` |
 | Biblioteca | `media_list`, `media_look`, `media_light_copy`, `media_copy`, `media_reveal`, `media_rename`, `media_delete`, `jobs_list` |
 | Texto | `media_search`, `media_ocr`, `ocr_reindex` |
@@ -82,6 +83,8 @@ El Hub arranca y para la app desde su ficha, y el manifiesto `faustus-plugin.jso
 | Ajustes | `settings_get`, `settings_set` |
 
 `snapshot_save` y `screen_look` aceptan `region`. Los mismos manejadores sirven a la interfaz web (`POST /api/ui/call`) y a `POST /api/agent/call` (token Bearer en `data/mcp-token`).
+
+`source_list` devuelve las fuentes disponibles y la pantalla elegida. `source_select` prepara la fuente y devuelve un token para `source_undo` si cambia la elección. La pantalla local empieza apagada. Para encenderla, usa el interruptor junto a la pantalla elegida en Ajustes de Baird y pulsa el atajo de Windows que aparece. Las herramientas de captura, grabación y copiloto aceptan `source` con `mode` y `monitor` para comprobar qué fuente van a usar. Al apagar la pantalla local se descartan las capturas, los clips y las miradas del copiloto pendientes. Los archivos ya guardados se consultan en la biblioteca. El overlay de escritorio y la integración conjunta del selector y la privacidad se entregan por separado. [Contrato de fuentes para agentes](docs/AGENT_SOURCES.md)
 
 La app lleva además procedimientos de la biblioteca de skills de la familia para los agentes que se conectan (`screen-capture-evidence`, `systematic-debugging`): aparecen en lo que el agente lee al conectarse, se leen con `skills_list` y `skill_read`, se buscan y asignan con `skills_library` y `skills_assign`, y se ofrecen como prompts. Se eligen en `/api/agent/skills/page` o en la pestaña Skills del Hub.
 

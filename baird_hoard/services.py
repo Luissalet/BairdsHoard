@@ -8,7 +8,9 @@ import time
 from typing import Any
 
 from . import __version__
+from .agent_sources import ProfileSources, capture_publication
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
+from .capture_approval import ConfirmCapture, confirm_with_windows
 from .capture_source import SyntheticSource
 from .config import REPO_ROOT, Config, Settings
 from .copilot import Copilot
@@ -35,7 +37,8 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 
 class Services:
-    def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None):
+    def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None,
+                 confirm_capture: ConfirmCapture = confirm_with_windows):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -49,6 +52,8 @@ class Services:
             self.monitor_source = monitor_source or MonitorSource(
                 self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
             )
+            if self.settings["capture_enabled"]:
+                self.settings.update({"capture_enabled": False})
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,
@@ -59,6 +64,7 @@ class Services:
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
+        self.sources = ProfileSources(self, confirm_capture)
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
@@ -77,6 +83,8 @@ class Services:
             test=(config.isolated_instance or not config.background or config.fake or config.synthetic_capture
                   or env_flag("BAIRD_OVERLAY_TEST")),
         )
+        self.library.capture_publication = lambda *, finalizes_call=False: capture_publication(self, finalizes_call=finalizes_call)
+        self.copilot.capture_publication = lambda: capture_publication(self)
         self.started = time.time()
 
     def _overlay_display(self) -> OverlayDisplay | None:
@@ -140,6 +148,12 @@ class Services:
         if state == "privacy_blocked":
             self.library.recorder.source_changed()
         self.stage.raw_state(state == "running")
+        if state == "reselect" or (state == "privacy_blocked" and previous != state):
+            with self.sources.lock:
+                if self.engine.snapshot()["state"] == state:
+                    if isinstance(self.sources, ProfileSources):
+                        self.sources.advance_revision()
+                    self.copilot.clear_looks()
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
             self.copilot.source_changed(state == "running")
@@ -155,16 +169,25 @@ class Services:
                 "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        with self.sources.lock:
+            return self._apply_settings(changes)
+
+    def _apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         before = self.settings.get()
         if self.monitor_source is not None and changes.get("monitor") is not None:
             selected_monitor(normalize_selection(changes["monitor"]), self.monitor_source.inventory())
         after = self.settings.update(changes)
+        if isinstance(self.sources, ProfileSources):
+            self.sources.settings_applied(before, after)
         self.buffer.keep_seconds = after["buffer_seconds"]
         if self.monitor_source is not None:
             different_source = any(before[k] != after[k] for k in ("monitor", "monitor_microphone"))
+            revoked = before["capture_enabled"] and not after["capture_enabled"]
             if different_source:
                 self.library.recorder.source_changed()
-            reopen = different_source or "monitor" in changes
+            if different_source or revoked:
+                self.copilot.clear_looks()
+            reopen = different_source or revoked or "monitor" in changes
         else:
             reopen = not self.config.synthetic_capture and any(before[k] != after[k] for k in ("device", "audio_input"))
         if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):
@@ -182,7 +205,7 @@ class Services:
 
     def status(self) -> dict[str, Any]:
         cap = self.engine.snapshot()
-        return {"capture": cap, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
+        return {"capture": cap, "source": self.sources.status(), "recording": self.library.recorder.status(), "viewers": self.live.viewers,
                 "transcription": self.transcriber.status(), "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
                 "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"]),

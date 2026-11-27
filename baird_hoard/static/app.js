@@ -14,6 +14,7 @@ const state = {
 
 async function api(path, opts = {}) {
   const init = { method: opts.method || 'GET', headers: {} };
+  if (opts.keepalive) init.keepalive = true;
   if (opts.body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(opts.body); }
   const res = await fetch(path, init);
   const text = await res.text();
@@ -763,13 +764,102 @@ $('tabs').addEventListener('click', (e) => {
 
 // ---------------------------------------------------------------- settings
 
+let settingsLocalCapture = false;
+let settingsCaptureControl = null;
+let settingsCapturePending = null;
+const settingsCaptureSwitch = $('settings-form').capture_enabled;
+
+function showCaptureControl(control) {
+  settingsCaptureControl = control;
+  settingsCaptureSwitch.disabled = !control?.ticket;
+  if (control) settingsCaptureSwitch.checked = control.active;
+  const display = control?.display;
+  const label = $('capture-enabled-label');
+  if (display) {
+    const name = `${display.name} (${display.width}×${display.height}, ${display.x}, ${display.y})`;
+    label.textContent = captureText(`Capturar ${name}`, `Capture ${name}`);
+  } else {
+    label.textContent = control
+      ? captureText('Elige un monitor para activar la captura.', 'Choose a monitor to turn on capture.')
+      : captureText('Activa la captura en Baird desde este PC.', 'Turn on capture in Baird on this PC.');
+  }
+}
+
+async function loadCaptureControl() {
+  try { showCaptureControl(await api('/api/settings/capture-control', { method: 'POST', body: {} })); }
+  catch { showCaptureControl(null); }
+}
+
+function cancelCaptureConfirmation() {
+  const pending = settingsCapturePending;
+  if (pending) {
+    settingsCapturePending = null;
+    api('/api/settings/capture-control', { method: 'DELETE', body: pending, keepalive: true }).catch(() => {});
+  }
+}
+
+async function showCaptureShortcut(operation, display) {
+  const label = $('capture-enabled-label');
+  while (settingsCapturePending === operation && $('settings').open) {
+    const { key } = await api('/api/settings/capture-control/confirmation', { method: 'POST', body: operation });
+    if (key && settingsCapturePending === operation) {
+      label.textContent = captureText(
+        `${display} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
+        `${display} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
+      );
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+}
+
+settingsCaptureSwitch.addEventListener('click', async (event) => {
+  if (!settingsLocalCapture) return;
+  if (!event.isTrusted || !navigator.userActivation?.isActive || !settingsCaptureControl?.ticket) {
+    event.preventDefault();
+    return;
+  }
+  const { ticket, active } = settingsCaptureControl;
+  const enabled = settingsCaptureSwitch.checked;
+  const operation = { ticket };
+  settingsCapturePending = operation;
+  settingsCaptureControl = null;
+  settingsCaptureSwitch.disabled = true;
+  const submission = api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } });
+  if (enabled) {
+    settingsCaptureSwitch.checked = active;
+    const label = $('capture-enabled-label');
+    const display = label.textContent;
+    label.setAttribute('aria-live', 'polite');
+    label.textContent = captureText(`${display} · Preparando la confirmación…`, `${display} · Preparing confirmation…`);
+    showCaptureShortcut(operation, display).catch(() => {});
+  }
+  try {
+    const control = await submission;
+    if (settingsCapturePending === operation) {
+      showCaptureControl(control);
+      refreshStatus();
+    }
+  } catch (err) {
+    if (settingsCapturePending === operation) {
+      settingsCaptureSwitch.checked = active;
+      fail(err);
+      await loadCaptureControl();
+    }
+  } finally {
+    if (settingsCapturePending === operation) settingsCapturePending = null;
+  }
+});
+
 async function openSettings() {
   const form = $('settings-form');
   try {
-    const s = await api('/api/settings');
+    const [s, status] = await Promise.all([api('/api/settings'), api('/api/status')]);
     state.settings = s;
     showDevices([], s.device);
     form.capture_enabled.checked = s.capture_enabled;
+    settingsLocalCapture = status.source.mode !== 'hdmi';
+    if (settingsLocalCapture) await loadCaptureControl();
     form.capture_always_on.checked = s.capture_always_on;
     for (const k of ['audio_input', 'snapshot_format', 'clip_seconds', 'buffer_seconds', 'light_height', 'light_kbps']) {
       const el = form[k];
@@ -808,16 +898,19 @@ $('btn-devices').addEventListener('click', async () => {
 });
 
 $('btn-settings').addEventListener('click', openSettings);
+window.addEventListener('pagehide', cancelCaptureConfirmation);
 $('settings').addEventListener('close', async () => {
+  cancelCaptureConfirmation();
   if ($('settings').returnValue !== 'save') return;
   const f = $('settings-form');
   const body = {
-    capture_enabled: f.capture_enabled.checked, capture_always_on: f.capture_always_on.checked, device: f.device.value, audio_input: f.audio_input.value,
+    capture_always_on: f.capture_always_on.checked, device: f.device.value, audio_input: f.audio_input.value,
     snapshot_format: f.snapshot_format.value, clip_seconds: +f.clip_seconds.value, buffer_seconds: +f.buffer_seconds.value,
     media_dir: f.media_dir.value.trim(), light_height: +f.light_height.value, light_kbps: +f.light_kbps.value,
     ocr_auto: f.ocr_auto.checked, hotkeys_enabled: f.hotkeys_enabled.checked,
     hotkey_shot: f.hotkey_shot.value.trim(), hotkey_clip: f.hotkey_clip.value.trim(),
   };
+  if (!settingsLocalCapture) body.capture_enabled = f.capture_enabled.checked;
   try { await api('/api/settings', { method: 'PUT', body }); toast('Ajustes guardados.', 'ok'); refreshStatus(); refreshList(true); }
   catch (err) { fail(err); }
 });
