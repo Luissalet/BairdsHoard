@@ -41,7 +41,8 @@ def capture_control_headers(client):
     return {"origin": str(client.base_url).rstrip("/"), "sec-fetch-site": "same-origin"}
 
 
-def confirm_test_shortcut(key, cancelled):
+def confirm_test_shortcut(key, cancelled, registered):
+    registered.set()
     return 6 <= key <= 11 and not cancelled.is_set()
 
 

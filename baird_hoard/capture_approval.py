@@ -12,7 +12,7 @@ from typing import Callable
 
 APPROVAL_KEYS = tuple(range(6, 12))
 APPROVAL_SECONDS = 20
-ConfirmCapture = Callable[[int, Event], bool]
+ConfirmCapture = Callable[[int, Event, Event], bool]
 
 _HOTKEY = 0x0312
 _MODIFIERS = 0x0001 | 0x0002 | 0x0004  # Alt, Ctrl, Shift
@@ -20,7 +20,7 @@ _NO_REPEAT = 0x4000
 _REMOVE = 1
 
 
-def confirm_with_windows(key: int, cancelled: Event) -> bool:
+def confirm_with_windows(key: int, cancelled: Event, registered: Event) -> bool:
     """Wait for one OS hotkey on this thread, with no window or input hook."""
     if os.name != "nt" or key not in APPROVAL_KEYS or cancelled.is_set():
         return False
@@ -45,6 +45,7 @@ def confirm_with_windows(key: int, cancelled: Event) -> bool:
     expected = (virtual_key << 16) | _MODIFIERS
     deadline = time.monotonic() + APPROVAL_SECONDS
     try:
+        registered.set()
         while not cancelled.is_set() and time.monotonic() < deadline:
             if (peek(ctypes.byref(message), None, _HOTKEY, _HOTKEY, _REMOVE)
                     and message.wParam == identifier and message.lParam == expected):

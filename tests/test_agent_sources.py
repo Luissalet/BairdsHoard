@@ -8,13 +8,14 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, nullcontext
 from dataclasses import replace
 from pathlib import Path
+from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from baird_hoard import capture, capture_approval
+from baird_hoard import agent_sources, capture, capture_approval
 from baird_hoard.agent_sources import SourceArgs, call_on_source
 from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
@@ -133,7 +134,7 @@ def test_complete_http_request_cannot_replace_local_approval(profile, monkeypatc
     client, svc = profile
     attempts = []
 
-    def deny(key, cancelled):
+    def deny(key, cancelled, registered):
         attempts.append((key, cancelled.is_set()))
         return False
 
@@ -147,6 +148,25 @@ def test_complete_http_request_cannot_replace_local_approval(profile, monkeypatc
     assert reply.status_code == 403 and reply.json()["code"] == "source_approval_required"
     assert len(attempts) == 1 and not attempts[0][1]
     assert not svc.settings["capture_enabled"] and svc.engine._thread is None
+
+
+def test_expired_dialog_shortcut_cannot_be_reissued_immediately(profile, monkeypatch):
+    client, svc = profile
+    agent(client, "source_select", SOURCE)
+    headers = capture_control_headers(client)
+    keys = []
+
+    def deny(key, cancelled, registered):
+        keys.append(key)
+        registered.set()
+        return False
+
+    monkeypatch.setattr(agent_sources, "choice", min)
+    monkeypatch.setattr(svc.sources, "_confirm", deny)
+    for _ in range(2):
+        ticket = client.post(CAPTURE_CONTROL, headers=headers).json()["ticket"]
+        assert client.put(CAPTURE_CONTROL, headers=headers, json={"ticket": ticket, "enabled": True}).status_code == 403
+    assert keys == list(capture_approval.APPROVAL_KEYS[:2]) and not svc.settings["capture_enabled"]
 
 
 def test_windows_confirmation_requires_the_matching_message_and_unregisters(monkeypatch):
@@ -166,7 +186,8 @@ def test_windows_confirmation_requires_the_matching_message_and_unregisters(monk
     native.PeekMessageW = Mock(side_effect=peek)
     monkeypatch.setattr(capture_approval, "os", SimpleNamespace(name="nt"))
     monkeypatch.setattr(capture_approval.ctypes, "WinDLL", lambda *a, **kw: native, raising=False)
-    assert capture_approval.confirm_with_windows(8, threading.Event())
+    registered = threading.Event()
+    assert capture_approval.confirm_with_windows(8, threading.Event(), registered) and registered.is_set()
     window, identifier, modifiers, vk = native.RegisterHotKey.call_args.args
     assert window is None and vk == 0x77 and modifiers == 0x4007
     assert events == [identifier, identifier]
@@ -180,11 +201,14 @@ def test_approval_cannot_activate_a_changed_or_cancelled_source(profile, monkeyp
     headers = capture_control_headers(client)
     control = client.post(CAPTURE_CONTROL, headers=headers).json()
     args = {"ticket": control["ticket"], "enabled": True}
-    waiting, gesture = threading.Event(), threading.Event()
+    waiting, registration, gesture = threading.Event(), threading.Event(), threading.Event()
+    keys = []
 
-    def confirm(key, cancelled):
-        assert key == control["approval_key"]
+    def confirm(key, cancelled, registered):
+        keys.append(key)
         waiting.set()
+        assert registration.wait(12)
+        registered.set()
         assert gesture.wait(12)
         return True  # Exercise the race even if the listener already had a matching event.
 
@@ -193,6 +217,17 @@ def test_approval_cannot_activate_a_changed_or_cancelled_source(profile, monkeyp
         pending = executor.submit(client.put, CAPTURE_CONTROL, headers=headers, json=args)
         try:
             assert waiting.wait(12)
+            prompt = CAPTURE_CONTROL + "/confirmation"
+            probe = {"ticket": control["ticket"]}
+            assert client.post(prompt, headers=headers, json=probe).json()["key"] is None
+            registration.set()
+            deadline = monotonic() + 8
+            while client.post(prompt, headers=headers, json=probe).json()["key"] != keys[0]:
+                assert monotonic() < deadline
+                sleep(0.02)
+            with closing(TestClient(client.app, base_url=str(client.base_url), client=("127.0.0.1", 50002))) as other:
+                other.post(CAPTURE_CONTROL, headers=headers)
+                assert other.post(prompt, headers=headers, json=probe).json()["key"] is None
             assert agent(client, "screen_look").json()["code"] == "source_off"
             if change == "selection":
                 assert agent(client, "source_select", {"mode": "monitor", "monitor": SECOND.id}).status_code == 200
@@ -202,6 +237,7 @@ def test_approval_cannot_activate_a_changed_or_cancelled_source(profile, monkeyp
                 cancelled = client.request("DELETE", CAPTURE_CONTROL, headers=headers, json={"ticket": control["ticket"]})
                 assert cancelled.status_code == 204
         finally:
+            registration.set()
             gesture.set()
         reply = pending.result(timeout=12)
     assert reply.status_code == (409 if change == "layout" else 403)

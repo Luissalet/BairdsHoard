@@ -798,30 +798,44 @@ function cancelCaptureConfirmation() {
   }
 }
 
+async function showCaptureShortcut(operation, display) {
+  const label = $('capture-enabled-label');
+  while (settingsCapturePending === operation && $('settings').open) {
+    const { key } = await api('/api/settings/capture-control/confirmation', { method: 'POST', body: operation });
+    if (key && settingsCapturePending === operation) {
+      label.textContent = captureText(
+        `${display} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
+        `${display} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
+      );
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 180));
+  }
+}
+
 settingsCaptureSwitch.addEventListener('click', async (event) => {
   if (!settingsLocalCapture) return;
   if (!event.isTrusted || !navigator.userActivation?.isActive || !settingsCaptureControl?.ticket) {
     event.preventDefault();
     return;
   }
-  const { ticket, active, approval_key: key } = settingsCaptureControl;
+  const { ticket, active } = settingsCaptureControl;
   const enabled = settingsCaptureSwitch.checked;
   const operation = { ticket };
   settingsCapturePending = operation;
   settingsCaptureControl = null;
   settingsCaptureSwitch.disabled = true;
+  const submission = api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } });
   if (enabled) {
     settingsCaptureSwitch.checked = active;
     const label = $('capture-enabled-label');
     const display = label.textContent;
     label.setAttribute('aria-live', 'polite');
-    label.textContent = captureText(
-      `${display} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
-      `${display} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
-    );
+    label.textContent = captureText(`${display} · Preparando la confirmación…`, `${display} · Preparing confirmation…`);
+    showCaptureShortcut(operation, display).catch(() => {});
   }
   try {
-    const control = await api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } });
+    const control = await submission;
     if (settingsCapturePending === operation) {
       showCaptureControl(control);
       refreshStatus();

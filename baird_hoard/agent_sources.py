@@ -6,14 +6,14 @@ import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from secrets import choice, token_urlsafe
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .capture_approval import APPROVAL_KEYS, ConfirmCapture
+from .capture_approval import APPROVAL_KEYS, APPROVAL_SECONDS, ConfirmCapture
 from .errors import BairdError
 from .monitor_source import selected_monitor
 
@@ -112,7 +112,15 @@ class CaptureControl:
     monitor: str
     active: bool
     expires: float
+
+
+@dataclass(frozen=True)
+class PendingCapture:
+    session: str
+    ticket: str
     key: int
+    cancelled: threading.Event = field(default_factory=threading.Event)
+    registered: threading.Event = field(default_factory=threading.Event)
 
 
 def activation_required() -> BairdError:
@@ -133,7 +141,8 @@ class ProfileSources:
         self._undo: tuple[str, int, dict[str, str] | None] | None = None
         self._controls: dict[str, CaptureControl] = {}
         self._confirm = confirm_capture
-        self._pending_capture: tuple[str, str, threading.Event] | None = None
+        self._pending_capture: PendingCapture | None = None
+        self._reserved_keys: dict[int, float] = {}
 
     def status(self, *, list_displays: bool = False) -> dict[str, Any]:
         svc = self._services
@@ -168,7 +177,7 @@ class ProfileSources:
         self._revision += 1
         self._controls.clear()
         if self._pending_capture is not None:
-            self._pending_capture[2].set()
+            self._pending_capture.cancelled.set()
 
     def capture_control(self, session: str) -> dict[str, Any]:
         """Issue a single-use control for the display shown to the person."""
@@ -184,11 +193,10 @@ class ProfileSources:
             if len(self._controls) >= 64:
                 self._controls.pop(next(iter(self._controls)))
             ticket = token_urlsafe(32)
-            key = choice(APPROVAL_KEYS)
             self._controls[ticket] = CaptureControl(session, self._revision, state["mode"], state["monitor"],
-                                                    armed, now + CONTROL_LIFETIME, key)
+                                                    armed, now + CONTROL_LIFETIME)
             shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
-            return {"active": armed, "display": shown, "ticket": ticket, "approval_key": key}
+            return {"active": armed, "display": shown, "ticket": ticket}
 
     def _validate_control(self, grant: CaptureControl, enabled: bool) -> None:
         svc = self._services
@@ -213,16 +221,22 @@ class ProfileSources:
                 return
             if self._pending_capture is not None:
                 raise BairdError("source_approval_pending", "A local capture confirmation is already pending.", status=409)
-            cancelled = threading.Event()
-            self._pending_capture = (session, ticket, cancelled)
+            now = time.monotonic()
+            available_keys = [key for key in APPROVAL_KEYS if self._reserved_keys.get(key, 0.0) <= now]
+            if not available_keys:
+                raise BairdError("source_approval_pending", "Please wait before requesting another local confirmation.", status=409)
+            pending = PendingCapture(session, ticket, choice(available_keys))
+            # A shortcut shown by an expiring dialog must not approve a different request.
+            self._reserved_keys[pending.key] = now + 2 * APPROVAL_SECONDS
+            self._pending_capture = pending
 
         try:
             try:
-                approved = self._confirm(grant.key, cancelled)
+                approved = self._confirm(pending.key, pending.cancelled, pending.registered)
             except OSError:
                 approved = False
             with self.lock:
-                if approved is not True or cancelled.is_set():
+                if approved is not True or not pending.registered.is_set() or pending.cancelled.is_set():
                     raise BairdError("source_approval_required", "Confirm the selected screen with the Windows shortcut shown in Baird.", status=403)
                 self._validate_control(grant, True)
                 self._services.apply_settings({"capture_enabled": True})
@@ -236,8 +250,16 @@ class ProfileSources:
             if grant is not None and grant.session == session:
                 del self._controls[ticket]
             pending = self._pending_capture
-            if pending is not None and pending[:2] == (session, ticket):
-                pending[2].set()
+            if pending is not None and (pending.session, pending.ticket) == (session, ticket):
+                pending.cancelled.set()
+
+    def capture_confirmation_key(self, *, session: str, ticket: str) -> int | None:
+        with self.lock:
+            pending = self._pending_capture
+            if (pending is not None and (pending.session, pending.ticket) == (session, ticket)
+                    and pending.registered.is_set() and not pending.cancelled.is_set()):
+                return pending.key
+            return None
 
     def _check_recording(self) -> None:
         if self._services.library.recorder.status()["state"] in ("recording", "paused", "finishing"):

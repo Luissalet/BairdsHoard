@@ -330,6 +330,16 @@ def cancel_capture_control(request: Request, body: CaptureTicketBody):
         services(request).sources.cancel_capture_control(session=session, ticket=body.ticket)
 
 
+@router.post(CONTROL_PATH + "/confirmation")
+def capture_confirmation(request: Request, body: CaptureTicketBody):
+    _require_capture_control(request)
+    session = request.cookies.get(CONTROL_COOKIE)
+    if not session:
+        raise activation_required()
+    key = services(request).sources.capture_confirmation_key(session=session, ticket=body.ticket)
+    return JSONResponse({"key": key}, headers={"Cache-Control": "no-store"})
+
+
 @router.get("/api/devices")
 def devices(request: Request):
     config = services(request).config
