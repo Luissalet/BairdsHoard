@@ -54,6 +54,24 @@ def set_local_capture(client, enabled):
     assert changed.status_code == 200 and changed.json()["active"] is enabled, changed.text
 
 
+def test_status_drops_stale_monitor_levels_and_zeros_them_on_stop(tmp_path):
+    settings = capture.Settings(tmp_path / "settings.json", isolated_instance=True)
+    settings.update({"capture_enabled": True})
+    source = MonitorSource("double-ffmpeg", tmp_path)
+    engine = capture.CaptureEngine(settings, capture.TsBuffer(), source=source, demand_only=True)
+    engine._set(state="running", audio_level=0.1831, microphone_level=0.1, level_monotonic=time.monotonic())
+    assert engine.snapshot()["audio_level"] == 0.1831
+
+    engine._set(state="running", audio_level=0.1831, microphone_level=0.1, level_monotonic=time.monotonic() - 5)
+    assert engine.snapshot()["audio_level"] == 0.0
+    assert engine.snapshot()["microphone_level"] == 0.0
+
+    engine._set(state="running", audio_level=0.1831, microphone_level=0.1, level_monotonic=time.monotonic())
+    engine._set(state="idle")
+    assert engine.snapshot()["audio_level"] == 0.0
+    assert engine.snapshot()["microphone_level"] is None
+
+
 def make_small_transport(path, *, microphone, seconds):
     command = ffmpeg_command(FFMPEG, MONITOR, SOFTWARE, microphone,
                              video="testsrc2=size=160x90:rate=30,format=yuv420p[desktop]", device=False)

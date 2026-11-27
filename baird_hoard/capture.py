@@ -36,6 +36,7 @@ SILENCE_LIMIT_S = 20.0   # the helper's own watchdog fires at 8 s; this is the b
 EXIT_GRACE_S = 4.0       # time a helper gets to leave after reporting an error
 KILL_GRACE_S = 6.0       # time a killed helper gets to disappear before the device counts as stuck
 IDLE_GRACE_S = 10.0
+AUDIO_LEVEL_MAX_AGE_S = 2.0
 RETRY_DELAYS_S = (15.0, 60.0, 300.0, 900.0)
 OPEN_LIMIT = 12
 OPEN_WINDOW_S = 3600.0
@@ -87,7 +88,9 @@ class CaptureEngine:
         self._thread: Optional[threading.Thread] = None
         self._changed = threading.Condition(self._lock)
         self._demands: set[object] = set()
+        self._meter_demands: set[object] = set()
         self._idle_until = 0.0
+        self._audio_level_at = float("-inf")
         self._retry_at = 0.0
         self._manual_open = False
         self._retry_step = 0
@@ -175,6 +178,7 @@ class CaptureEngine:
             self._retry_at = self._limit_until = 0.0
             self._retry_step = self._fails = 0
             self.buffer.reset()
+            self._audio_level_at = float("-inf")
             self.state.update(state="idle", message="", device="", input=None, kbps=0, since=None, audio=False)
             self.settings_changed(reopen=True)
         if previous is not None:
@@ -187,18 +191,20 @@ class CaptureEngine:
 
     def _wanted(self) -> bool:
         if self._local_source is not None:
-            return self._local_source.producer is not None and bool(self._demands)
+            return self._local_source.producer is not None and bool(self._demands or self._meter_demands)
         return (self.settings["capture_enabled"] and not self._needs_selection and self._privacy_block is None
-                and bool(self._demands or (not self._demand_only and self.settings["capture_always_on"])))
+                and bool(self._demands or (self._meter_demands if self._demand_only
+                                          else self.settings["capture_always_on"])))
 
-    def set_demand(self, source: object, active: bool) -> None:
+    def set_demand(self, source: object, active: bool, *, monitor_meter: bool = False) -> None:
         with self._lock:
+            demands = self._meter_demands if monitor_meter else self._demands
             if active:
-                self._demands.add(source)
+                demands.add(source)
             else:
-                if source in self._demands and len(self._demands) == 1:
+                if not monitor_meter and source in demands and len(demands) == 1:
                     self._idle_until = time.monotonic() + IDLE_GRACE_S
-                self._demands.discard(source)
+                demands.discard(source)
             if self._wanted():
                 self._start()
             else:
@@ -270,6 +276,11 @@ class CaptureEngine:
                 out.update(state="idle", message="")
             elif self._restart.is_set() and out["state"] == "running":
                 out.update(state="starting", input=None, kbps=0, since=None)
+            if "audio_level" in out:
+                if out["state"] != "running" or self._stop.is_set():
+                    out.update(audio_level=0.0, microphone_level=None)
+                elif time.monotonic() - self._audio_level_at >= AUDIO_LEVEL_MAX_AGE_S:
+                    out.update(audio_level=0.0, microphone_level=0.0 if out.get("microphone_level") is not None else None)
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
@@ -310,10 +321,14 @@ class CaptureEngine:
 
     # ------------------------------------------------------------------ internals
 
-    def _set(self, **changes: Any) -> None:
+    def _set(self, *, process=None, level_monotonic: float | None = None, **changes: Any) -> None:
         with self._changed:
+            if process is not None and (self._proc is not process or self._proc_local is not self._local_source):
+                return
             if self._privacy_block is not None and changes.get("state") in ("starting", "running"):
                 return
+            if level_monotonic is not None:
+                self._audio_level_at = level_monotonic
             self.state.update(changes)
             snap = dict(self.state)
             self._changed.notify_all()
@@ -453,6 +468,7 @@ class CaptureEngine:
                 self._limit_until = time.monotonic() + limit
             else:
                 self.buffer.reset()
+                self._audio_level_at = float("-inf")
                 self._fatal = None
                 cwd = self._source_cwd if local is None else self._local_source_cwd
                 proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -703,14 +719,16 @@ class CaptureEngine:
                 continue
             kind = evt.get("event")
             if kind == "ready":
-                self._set(device=evt.get("device", ""), encoder=evt.get("encoder", ""), input=evt.get("input"),
+                self._set(process=proc, device=evt.get("device", ""), encoder=evt.get("encoder", ""), input=evt.get("input"),
                           audio=self.buffer.audio_pid is not None or True)
                 log.info("capture ready: %s", line[:400])
             elif kind == "stats":
-                self._set(kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None,
+                measured_at = evt.get("level_monotonic", time.monotonic()) if "audio_level" in evt else None
+                self._set(process=proc, level_monotonic=measured_at,
+                          kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None,
                           **{key: evt[key] for key in ("audio_level", "microphone_level") if key in evt})
             elif kind == "signal":
-                self._set(input=evt.get("input"))
+                self._set(process=proc, input=evt.get("input"))
             elif kind == "error":
                 code = str(evt.get("code", ""))
                 message = str(evt.get("message", ""))[:300]

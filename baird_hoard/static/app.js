@@ -68,6 +68,8 @@ class LivePlayer {
     this.retry = 1000; this.retryTimer = null;
     this.pageActive = true;
     this.sourceAvailable = true;
+    this.monitorMeter = false;
+    this.meterWs = null;
     setInterval(() => this.chase(), 400);
     document.addEventListener('visibilitychange', () => this.sync());
     el.addEventListener('enterpictureinpicture', () => this.sync());
@@ -77,6 +79,7 @@ class LivePlayer {
   }
 
   sync() {
+    this.syncMeter();
     if (this.sourceAvailable && this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
       this.connect();
       this.chase(true);
@@ -90,10 +93,27 @@ class LivePlayer {
     }
   }
 
-  setSourceAvailable(available) {
-    if (this.sourceAvailable === available) return;
+  setSourceAvailable(available, monitorMeter) {
+    if (this.sourceAvailable === available && this.monitorMeter === monitorMeter) {
+      this.syncMeter();
+      return;
+    }
     this.sourceAvailable = available;
+    this.monitorMeter = monitorMeter;
     this.sync();
+  }
+
+  syncMeter() {
+    if (this.pageActive && this.monitorMeter) {
+      if (this.meterWs) return;
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/api/live?view=meter`);
+      this.meterWs = ws;
+      ws.onclose = () => { if (this.meterWs === ws) this.meterWs = null; };
+    } else if (this.meterWs) {
+      this.meterWs.close();
+      this.meterWs = null;
+    }
   }
 
   connect() {
@@ -236,7 +256,8 @@ async function refreshStatus() {
   try { st = await api('/api/status'); } catch { setChip('error', 'Hoard sin respuesta'); return; }
   state.status = st;
   const sourceMessage = sourceControls.update(st);
-  player.setSourceAvailable(!st.source || st.source.mode === 'hdmi' || st.source.active);
+  const local = st.source && st.source.mode !== 'hdmi';
+  player.setSourceAvailable(!local || st.source.active, Boolean(local && st.source.active));
   const cap = st.capture || {};
   const s = cap.state || 'off';
   const monitor = cap.source === 'monitor';

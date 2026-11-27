@@ -139,7 +139,8 @@ def _drain(lines: BinaryIO, tail: deque, levels: dict | None = None):
         if levels is not None and line.startswith('{"event":"levels"'):
             try:
                 data = json.loads(line)
-                levels.update(audio_level=data["audio_level"], microphone_level=data["microphone_level"])
+                levels.update(audio_level=data["audio_level"], microphone_level=data["microphone_level"],
+                              level_monotonic=time.monotonic())
                 continue
             except (KeyError, ValueError):
                 pass

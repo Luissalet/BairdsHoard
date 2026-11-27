@@ -6,6 +6,7 @@ import json
 import queue
 import struct
 import threading
+import time
 from contextlib import ExitStack
 
 
@@ -82,7 +83,8 @@ class AudioGrants:
                     self.messages.put(message)
                 elif message.startswith(b'{"event":"levels"'):
                     event = json.loads(message)
-                    self.levels.update(audio_level=event["audio_level"], microphone_level=event["microphone_level"])
+                    self.levels.update(audio_level=event["audio_level"], microphone_level=event["microphone_level"],
+                                       level_monotonic=time.monotonic())
         except (OSError, ValueError, KeyError):
             pass
         finally:
