@@ -10,7 +10,7 @@ from secrets import randbelow
 from threading import Event
 from typing import Callable
 
-APPROVAL_KEYS = tuple(range(6, 12))
+APPROVAL_KEYS = (6, 7, 8, 9, 11)  # F10 is reserved for hiding the overlay.
 APPROVAL_SECONDS = 20
 ConfirmCapture = Callable[[int, Event, Event], bool]
 

@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .capture_approval import APPROVAL_KEYS, APPROVAL_SECONDS, ConfirmCapture
 from .errors import BairdError
-from .monitor_source import selected_monitor
+from .monitor_source import DesktopMonitor, selected_monitor
 
 SourceMode = Literal["hdmi", "monitor", "overlay"]
 
@@ -132,7 +132,7 @@ def activation_required() -> BairdError:
 
 
 class ProfileSources:
-    """Source controller for the fixed HDMI or monitor profiles.
+    """Source controller for the fixed HDMI, monitor and overlay profiles.
 
     The source bar's SourceControls can supply the same status/select/undo
     operations when the live selector is composed with the monitor backend.
@@ -166,10 +166,27 @@ class ProfileSources:
             if local and list_displays:
                 monitors = [{**display, "left": display["x"], "top": display["y"]}
                             for display in svc.monitor_source.list_monitors()]
-            mode = "monitor" if local else "hdmi"
+            mode = ("overlay" if svc.config.overlay_mode else "monitor") if local else "hdmi"
             return {"mode": mode, "modes": [mode], "monitor": selection["id"] if selection else None,
                     "active": bool(active and not blocked), "blocked": blocked, "monitors": monitors,
                     "revision": self._revision}
+
+    def overlay_monitor(self) -> DesktopMonitor | None:
+        """Read the selected physical geometry without taking the source lock.
+
+        The presenter can call this while the copilot holds its state lock.
+        Source changes also clear copilot state while holding the source lock.
+        """
+        svc = self._services
+        if not svc.config.overlay_mode or svc.monitor_source is None:
+            return None
+        settings = svc.settings.get()
+        if not settings["capture_enabled"] or settings["monitor"] is None:
+            return None
+        try:
+            return selected_monitor(settings["monitor"], svc.monitor_source.inventory())
+        except (BairdError, OSError):
+            return None
 
     def settings_applied(self, before: dict, after: dict) -> None:
         if self._services.monitor_source is not None and any(

@@ -4,6 +4,7 @@ import sys
 import time
 from ctypes import c_void_p
 from ctypes import wintypes
+from dataclasses import replace
 from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 from baird_hoard.config import Config
 from baird_hoard.hotkeys import MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT
 from baird_hoard.main import create_app
+from baird_hoard.monitor_source import MonitorSource
 from baird_hoard import overlay_windows as win
 from baird_hoard.overlay import CopilotOverlay, MemoryOverlay, OverlayDisplay, selected_overlay_display
 from baird_hoard.overlay_windows import (
@@ -38,6 +40,8 @@ from baird_hoard.overlay_windows import (
     Win32Window,
 )
 from baird_hoard.services import Services
+
+from .test_monitor_source import MONITOR, choose, confirm_test_shortcut, set_local_capture
 
 DISPLAY = OverlayDisplay("test-secondary", -1920, -320, 1920, 1080)
 SOURCE = {"mode": "overlay", "active": True, "blocked": None, "monitor": DISPLAY.id,
@@ -88,6 +92,34 @@ def agent(client, svc, name, **arguments):
                            json={"name": name, "arguments": arguments})
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_fixed_overlay_profile_shares_the_monitor_permission_and_validates_layout(tmp_path, monkeypatch):
+    inventory = [MONITOR]
+
+    def unexpected_open(*args):
+        pytest.fail("geometry and authorization must not open a capture device")
+
+    config = Config(data_dir=tmp_path, port=17644, monitor_capture=True, overlay_mode=True,
+                    isolated_instance=True, background=False)
+    source = MonitorSource("synthetic-encoder", config.work_dir, lambda: inventory, unexpected_open)
+    svc = Services(config, monitor_source=source, confirm_capture=confirm_test_shortcut)
+    monkeypatch.setattr(svc.engine, "set_demand", Mock())
+    with TestClient(create_app(config, svc), base_url="http://127.0.0.1:17644", client=("127.0.0.1", 44444)) as client:
+        assert agent(client, svc, "source_list")["modes"] == ["overlay"]
+        result = agent(client, svc, "source_select", mode="overlay", monitor=MONITOR.id)
+        assert not result["active"] and svc._overlay_display() is None
+        set_local_capture(client, True)
+        assert agent(client, svc, "source_list")["active"]
+        svc.engine.state["state"] = "running"
+        geometry = OverlayDisplay(MONITOR.id, MONITOR.x, MONITOR.y, MONITOR.width, MONITOR.height)
+        assert svc._overlay_display() == geometry
+        inventory[0] = replace(MONITOR, x=MONITOR.x - 100)
+        assert svc._overlay_display() is None
+        inventory[0] = MONITOR
+        set_local_capture(client, False)
+        assert svc._overlay_display() is None and not agent(client, svc, "source_list")["active"]
+    assert svc.engine._proc is None
 
 
 def test_uses_only_the_selected_active_overlay_display():

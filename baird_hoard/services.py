@@ -88,10 +88,12 @@ class Services:
         self.started = time.time()
 
     def _overlay_display(self) -> OverlayDisplay | None:
-        # The source selector owns monitor identity, the topology and whether capture was explicitly enabled.
-        sources = getattr(self, "sources", None)
-        if sources is None or self.engine.snapshot()["state"] != "running":
+        if self.engine.snapshot()["state"] != "running":
             return None
+        sources = self.sources
+        if isinstance(sources, ProfileSources):
+            display = sources.overlay_monitor()
+            return OverlayDisplay(display.id, display.x, display.y, display.width, display.height) if display else None
         return selected_overlay_display(sources.status())
 
     def start(self) -> None:
