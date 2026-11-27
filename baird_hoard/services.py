@@ -131,11 +131,12 @@ class Services:
         if state == "privacy_blocked":
             self.library.recorder.source_changed()
         self.stage.raw_state(state == "running")
-        if state == "reselect" and previous != state:
+        if state == "reselect":
             with self.sources.lock:
-                if isinstance(self.sources, ProfileSources):
-                    self.sources.advance_revision()
-                self.copilot.clear_looks()
+                if self.engine.snapshot()["state"] == "reselect":
+                    if isinstance(self.sources, ProfileSources):
+                        self.sources.advance_revision()
+                    self.copilot.clear_looks()
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
             self.copilot.source_changed(state == "running")

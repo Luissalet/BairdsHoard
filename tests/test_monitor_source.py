@@ -286,6 +286,8 @@ def test_services_open_only_on_demand_and_require_a_new_selection(stream, tmp_pa
             with pytest.raises(BairdError, match="Choose a monitor again"):
                 svc.engine.wait_for_picture()
         assert client.put("/api/settings", json={"monitor": selection, "monitor_microphone": True}).status_code == 200
+        assert not svc.sources.status()["active"] and len(starts) == 1
+        set_local_capture(client, True)
         with svc.engine.request():
             svc.engine.wait_for_picture()
         wait_until(lambda: svc.engine.snapshot()["state"] == "idle")
