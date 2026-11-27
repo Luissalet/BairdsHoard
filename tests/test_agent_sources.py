@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing, nullcontext
+from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -10,14 +15,15 @@ from fastapi.testclient import TestClient
 
 from baird_hoard import capture
 from baird_hoard.agent_sources import SourceArgs, call_on_source
-from baird_hoard.config import Config
+from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
 from baird_hoard.main import create_app
 from baird_hoard.monitor_source import MonitorSource
 from baird_hoard.services import Services
 
 from .conftest import FFMPEG
-from .test_monitor_source import MONITOR, SECOND, make_small_transport
+from .test_monitor_source import (CAPTURE_CONTROL, MONITOR, SECOND, capture_control_headers, make_small_transport,
+                                  set_local_capture)
 
 PORT = 17531
 SOURCE = {"mode": "monitor", "monitor": MONITOR.id}
@@ -29,9 +35,12 @@ def agent(client, name, arguments=None, **body):
 
 
 def human_settings(client, **body):
-    result = client.put("/api/settings", json=body)
-    assert result.status_code == 200, result.text
-    return result.json()
+    enabled = body.pop("capture_enabled", None)
+    if body:
+        result = client.put("/api/settings", json=body)
+        assert result.status_code == 200, result.text
+    if enabled is not None:
+        set_local_capture(client, enabled)
 
 
 @pytest.fixture
@@ -73,6 +82,8 @@ def test_contract_and_credential_boundary(profile):
     signed_browser_route = client.put("/api/settings", json={"capture_enabled": True},
                                       headers={"Authorization": f"Bearer {svc.token}"})
     assert signed_browser_route.status_code == 403
+    local_client = client.put("/api/settings", json={"capture_enabled": True})
+    assert local_client.status_code == 403 and local_client.json()["code"] == "source_activation_required"
     ui_call = client.post("/api/ui/call", json={"name": "settings_set", "arguments": {"capture_enabled": True}})
     assert ui_call.status_code == 403
     forged = agent(client, "settings_set", {"capture_enabled": True}, caller="ui")
@@ -115,6 +126,130 @@ def test_disabled_source_gets_an_explicit_error_before_capture(profile):
     stopped = agent(client, "record_stop", {"source": SOURCE})
     assert stopped.status_code == 409 and stopped.json()["code"] == "conflict"
     assert svc.engine._thread is None and not svc.engine._demands and svc.buffer.latest()[1] == 0
+
+
+def test_capture_ticket_belongs_to_its_browser_and_selection(profile):
+    client, svc = profile
+    agent(client, "source_select", SOURCE)
+    headers = capture_control_headers(client)
+    assert client.post(CAPTURE_CONTROL).status_code == 403
+    issued = client.post(CAPTURE_CONTROL, headers=headers)
+    ticket = issued.json()["ticket"]
+    assert issued.json()["display"]["x"] == MONITOR.x
+    assert "httponly" in issued.headers["set-cookie"].lower()
+    assert issued.headers["cache-control"] == "no-store"
+
+    args = {"ticket": ticket, "enabled": True}
+    forged = client.put(CAPTURE_CONTROL, headers={**headers, "authorization": f"Bearer {svc.token}"}, json=args)
+    assert forged.status_code == 403
+    with closing(TestClient(client.app, base_url=str(client.base_url), client=("127.0.0.1", 50001))) as stranger:
+        assert stranger.put(CAPTURE_CONTROL, headers=headers, json=args).status_code == 403
+    agent(client, "source_select", {"mode": "monitor", "monitor": SECOND.id})
+    assert client.put(CAPTURE_CONTROL, headers=headers, json=args).status_code == 403
+    assert not svc.settings["capture_enabled"]
+
+    next_ticket = client.post(CAPTURE_CONTROL, headers=headers).json()["ticket"]
+    next_args = {"ticket": next_ticket, "enabled": True}
+    assert client.put(CAPTURE_CONTROL, headers=headers, json=next_args).json()["active"]
+    assert client.put(CAPTURE_CONTROL, headers=headers, json=next_args).status_code == 403
+    assert svc.settings["monitor"]["id"] == SECOND.id and svc.settings["capture_enabled"]
+    assert svc.engine._thread is None
+
+
+def test_capture_ticket_rechecks_display_layout(profile):
+    client, svc = profile
+    agent(client, "source_select", SOURCE)
+    headers = capture_control_headers(client)
+    ticket = client.post(CAPTURE_CONTROL, headers=headers).json()["ticket"]
+    svc.monitor_source = replace(svc.monitor_source, inventory=lambda: [replace(MONITOR, x=-500), SECOND])
+    stale = client.put(CAPTURE_CONTROL, headers=headers, json={"ticket": ticket, "enabled": True})
+    assert stale.status_code == 409 and stale.json()["code"] == "monitor_reselect"
+    assert svc.engine._thread is None and not svc.settings["capture_enabled"]
+
+
+def test_monitor_profile_restarts_with_capture_off(tmp_path):
+    config = Config(data_dir=tmp_path, port=PORT, monitor_capture=True, isolated_instance=True, background=False)
+    source = MonitorSource("unused-double", tmp_path, lambda: [MONITOR])
+    settings = Settings(config.settings_path, isolated_instance=True)
+    settings.update({"monitor": source.list_monitors()[0]["selection"], "capture_enabled": True})
+    svc = Services(config, monitor_source=source)
+    assert svc.settings["monitor"]["id"] == MONITOR.id and not svc.sources.status()["active"]
+    assert not svc.settings["capture_enabled"] and svc.engine._thread is None
+
+
+@pytest.fixture
+def rendered_picture(profile, monkeypatch):
+    client, svc = profile
+    agent(client, "source_select", SOURCE)
+    set_local_capture(client, True)
+    monkeypatch.setattr(svc.engine, "request", nullcontext)
+    monkeypatch.setattr(svc.engine, "wait_for_picture", lambda: None)
+    monkeypatch.setattr(svc.library, "input_size", lambda: (160, 90))
+    return client, svc
+
+
+@pytest.mark.parametrize("reactivate", [False, True])
+def test_pending_snapshot_never_reaches_library_or_ocr(rendered_picture, monkeypatch, reactivate):
+    client, svc = rendered_picture
+    monkeypatch.setattr(svc.buffer, "latest", lambda: (b"synthetic-transport", 1))
+    staged, finish = threading.Event(), threading.Event()
+    notified = []
+    svc.library.on_new_image = notified.append
+
+    def decode(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"synthetic-image")
+        if not finish.is_set():
+            staged.set()
+            assert finish.wait(8), "snapshot never received permission to finish rendering"
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    finish.set()
+    monkeypatch.setattr(svc.library, "_run", decode)
+    published = agent(client, "snapshot_save").json()["name"]
+    assert len(notified) == 1
+    finish.clear()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(agent, client, "snapshot_save")
+        try:
+            assert staged.wait(8)
+            assert [row["name"] for row in svc.library.list(kind="image")] == [published]
+            set_local_capture(client, False)
+            if reactivate:
+                set_local_capture(client, True)
+        finally:
+            finish.set()
+        response = pending.result(timeout=8)
+
+    assert response.status_code == (409 if reactivate else 403)
+    assert response.json()["code"] == ("source_changed" if reactivate else "source_off")
+    assert [row["name"] for row in svc.library.list(kind="image")] == [published]
+    assert [path.name for path in svc.library.folder.iterdir()] == [published]
+    assert set(svc.library._index) == {published} and len(notified) == 1
+
+
+@pytest.mark.parametrize("url", [None, "/copilot/look.jpg"])
+def test_pending_look_never_repopulates_revoked_cache(rendered_picture, monkeypatch, url):
+    client, svc = rendered_picture
+    render, finish = threading.Event(), threading.Event()
+
+    def grab(*args, **kwargs):
+        render.set()
+        assert finish.wait(8), "look never received permission to finish rendering"
+        return b"synthetic-jpeg", 160, 90
+
+    monkeypatch.setattr(svc.library, "grab_jpeg", grab)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending = executor.submit(client.get, url) if url else executor.submit(agent, client, "copilot_look")
+        try:
+            assert render.wait(8)
+            set_local_capture(client, False)
+        finally:
+            finish.set()
+        response = pending.result(timeout=8)
+
+    assert response.status_code == 403 and response.json()["code"] == "source_off"
+    assert not svc.copilot._looks and svc.copilot._last_look is None
 
 
 def test_selection_undo_restores_the_previous_monitor_off(profile):

@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from . import __version__
-from .agent_sources import ProfileSources
+from .agent_sources import ProfileSources, capture_publication
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .capture_source import SyntheticSource
 from .config import REPO_ROOT, Config, Settings
@@ -48,6 +48,8 @@ class Services:
             self.monitor_source = monitor_source or MonitorSource(
                 self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
             )
+            if self.settings["capture_enabled"]:
+                self.settings.update({"capture_enabled": False})
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,
@@ -72,6 +74,7 @@ class Services:
         self.hotkeys = HotkeyHelper(config.data_dir / "hotkeys-status.json", config.port)
         self.copilot = Copilot(engine=self.engine, library=self.library, settings=self.settings, reader=TextReader(),
                                ffmpeg=self.ffmpeg, work_dir=config.work_dir)
+        self.library.capture_publication = self.copilot.capture_publication = lambda: capture_publication(self)
         self.started = time.time()
 
     def start(self) -> None:
@@ -129,7 +132,10 @@ class Services:
             self.library.recorder.source_changed()
         self.stage.raw_state(state == "running")
         if state == "reselect" and previous != state:
-            self.copilot.clear_looks()
+            with self.sources.lock:
+                if isinstance(self.sources, ProfileSources):
+                    self.sources.advance_revision()
+                self.copilot.clear_looks()
         if state != previous and (state == "running" or previous == "running"):
             self.live.source_changed(state == "running")
             self.copilot.source_changed(state == "running")
@@ -145,6 +151,10 @@ class Services:
                 "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        with self.sources.lock:
+            return self._apply_settings(changes)
+
+    def _apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         before = self.settings.get()
         if self.monitor_source is not None and changes.get("monitor") is not None:
             selected_monitor(normalize_selection(changes["monitor"]), self.monitor_source.inventory())
@@ -154,11 +164,12 @@ class Services:
         self.buffer.keep_seconds = after["buffer_seconds"]
         if self.monitor_source is not None:
             different_source = any(before[k] != after[k] for k in ("monitor", "monitor_microphone"))
+            revoked = before["capture_enabled"] and not after["capture_enabled"]
             if different_source:
                 self.library.recorder.source_changed()
-            if different_source or (before["capture_enabled"] and not after["capture_enabled"]):
+            if different_source or revoked:
                 self.copilot.clear_looks()
-            reopen = different_source or "monitor" in changes
+            reopen = different_source or revoked or "monitor" in changes
         else:
             reopen = not self.config.synthetic_capture and any(before[k] != after[k] for k in ("device", "audio_input"))
         if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):

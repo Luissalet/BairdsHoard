@@ -25,8 +25,10 @@ import subprocess
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import quote
 from typing import Any, Callable, Optional
 
@@ -62,6 +64,7 @@ class Library:
         self._index: dict[str, dict[str, Any]] = read_json(config.index_path, default={}) or {}
         self._jobs: dict[str, dict[str, Any]] = {}
         self.recorder = Recorder(self)
+        self.capture_publication = nullcontext
         # Hooks the services set: a new screenshot exists / a file was renamed / a file was deleted.
         self.on_new_image: Optional[Any] = None
         self.on_rename: Optional[Any] = None
@@ -99,12 +102,13 @@ class Library:
             raise BairdError("not_found", f"There is no file called {name!r} in the library.", "media_list shows the names.")
         return path
 
-    def _new_path(self, prefix: str, ext: str, suffix: str = "") -> Path:
+    def _new_path(self, prefix: str, ext: str, suffix: str = "", *, folder: Path | None = None) -> Path:
+        folder = self.folder if folder is None else folder
         base = f"{prefix} {_stamp()}{suffix}"
-        path = self.folder / f"{base}{ext}"
+        path = folder / f"{base}{ext}"
         n = 2
         while path.exists():
-            path = self.folder / f"{base} ({n}){ext}"
+            path = folder / f"{base} ({n}){ext}"
             n += 1
         return path
 
@@ -217,6 +221,7 @@ class Library:
     def snapshot(self, fmt: Optional[str] = None, region: Optional[dict[str, Any]] = None, *,
                  prefix: Optional[str] = None, origin: Optional[str] = None) -> dict[str, Any]:
         """Save the current picture (or only ``region`` of it); returns its description."""
+        publication = self.capture_publication()
         ff = self._need_ffmpeg()
         fmt = (fmt or self.settings["snapshot_format"]).lower()
         if fmt not in ("png", "jpg"):
@@ -228,22 +233,28 @@ class Library:
             data, frames = self.buffer.latest()
             if not data:
                 raise BairdError("no_signal", "No picture has arrived yet.", "Wait a second and try again.")
-        out = self._new_path(prefix or ("Captura zona" if region else "Captura"), "." + fmt)
+        folder = self.folder
         enc = ["-c:v", "png"] if fmt == "png" else ["-q:v", "2"]
         last_err = ""
-        for index in (max(0, frames - 2), 0):
-            vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
-            args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an",
-                    "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(out)]
-            proc = self._run(args, data=data, timeout=20)
-            if proc.returncode == 0 and out.is_file() and out.stat().st_size > 0:
-                size = self._probe(out) if region else {"width": inp.get("width"), "height": inp.get("height")}
-                desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
-                                      height=size.get("height"), taken=time.time(), region=region)
-                self._fire("on_new_image", out)
-                return desc
-            out.unlink(missing_ok=True)
-            last_err = proc.stderr.decode("utf-8", "replace")[-300:]
+        # A staged image is never listed or served. Keep it on the destination volume for the atomic move.
+        with TemporaryDirectory(prefix=".baird-capture-", dir=folder) as staging:
+            draft = Path(staging) / f"picture.{fmt}"
+            for index in (max(0, frames - 2), 0):
+                vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
+                args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an",
+                        "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(draft)]
+                proc = self._run(args, data=data, timeout=20)
+                if proc.returncode == 0 and draft.is_file() and draft.stat().st_size > 0:
+                    size = self._probe(draft) if region else {"width": inp.get("width"), "height": inp.get("height")}
+                    with publication, self._lock:
+                        out = self._new_path(prefix or ("Captura zona" if region else "Captura"), "." + fmt, folder=folder)
+                        os.replace(draft, out)
+                        desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
+                                              height=size.get("height"), taken=time.time(), region=region)
+                    self._fire("on_new_image", out)
+                    return desc
+                draft.unlink(missing_ok=True)
+                last_err = proc.stderr.decode("utf-8", "replace")[-300:]
         raise BairdError("failed", "Could not decode the picture.", last_err)
 
     def grab_gray(self, region: Optional[dict[str, Any]] = None, size: tuple[int, int] = (96, 54)) -> bytes:

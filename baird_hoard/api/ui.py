@@ -6,14 +6,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import time
+from secrets import token_urlsafe
 from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from ..agent_sources import CONTROL_LIFETIME, activation_required
 from ..agent_tools import TOOLS_BY_NAME
 from ..document_review import original_view
 from ..errors import BairdError
@@ -22,6 +24,8 @@ from ..native import list_devices
 from .deps import services, tool
 
 router = APIRouter()
+CONTROL_COOKIE = "baird_capture_ui"
+CONTROL_PATH = "/api/settings/capture-control"
 
 
 class CallBody(BaseModel):
@@ -262,9 +266,58 @@ def settings_get(request: Request):
 def settings_put(request: Request, body: dict[str, Any]):
     svc = services(request)
     if svc.monitor_source is not None and {"capture_enabled", "monitor", "monitor_microphone"} & body.keys():
-        if request.headers.get("authorization") or request.client is None or request.client.host not in ("127.0.0.1", "::1"):
-            raise BairdError("source_activation_required", "Change local screen settings in Baird on this computer.", status=403)
+        if "capture_enabled" in body or not _local_settings_client(request):
+            raise activation_required()
+        with svc.sources.lock:
+            if "monitor" in body and (body["monitor"] != svc.settings["monitor"] or svc.sources.status()["blocked"]):
+                body = {**body, "capture_enabled": False}
+            return svc.apply_settings(body)
     return svc.apply_settings(body)
+
+
+def _local_settings_client(request: Request) -> bool:
+    return (not request.headers.get("authorization") and request.client is not None
+            and request.client.host in ("127.0.0.1", "::1")
+            and request.url.hostname in ("localhost", "127.0.0.1", "::1"))
+
+
+def _require_capture_control(request: Request) -> None:
+    if (services(request).monitor_source is None or not _local_settings_client(request)
+            or request.headers.get("sec-fetch-site") != "same-origin"
+            or request.headers.get("origin") != str(request.base_url).rstrip("/")):
+        raise activation_required()
+
+
+@router.post(CONTROL_PATH)
+def capture_control(request: Request):
+    _require_capture_control(request)
+    session = request.cookies.get(CONTROL_COOKIE) or token_urlsafe(32)
+    return _capture_control_response(request, session)
+
+
+def _capture_control_response(request: Request, session: str):
+    control = services(request).sources.capture_control(session)
+    response = JSONResponse(control, headers={"Cache-Control": "no-store"})
+    response.set_cookie(CONTROL_COOKIE, session, max_age=CONTROL_LIFETIME, path=CONTROL_PATH,
+                        httponly=True, samesite="strict", secure=request.url.scheme == "https")
+    return response
+
+
+class CaptureControlBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    ticket: str = Field(min_length=43, max_length=43)
+    enabled: StrictBool
+
+
+@router.put(CONTROL_PATH)
+def set_capture_control(request: Request, body: CaptureControlBody):
+    _require_capture_control(request)
+    svc = services(request)
+    session = request.cookies.get(CONTROL_COOKIE)
+    if not session:
+        raise activation_required()
+    svc.sources.set_capture(session=session, ticket=body.ticket, enabled=body.enabled)
+    return _capture_control_response(request, session)
 
 
 @router.get("/api/devices")

@@ -30,10 +30,23 @@ from .conftest import FFMPEG
 MONITOR = DesktopMonitor("panel-left", "Panel", -160, 0, 160, 90, 1, 2, 0, 0x10DE)
 SECOND = DesktopMonitor("panel-right", "Panel", 0, 0, 160, 90, 1, 0, 0, 0x8086)
 PORT = 17525
+CAPTURE_CONTROL = "/api/settings/capture-control"
 
 
 def choose(monitor, inventory):
     return {"id": monitor.id, "layout": layout_id(inventory)}
+
+
+def capture_control_headers(client):
+    return {"origin": str(client.base_url).rstrip("/"), "sec-fetch-site": "same-origin"}
+
+
+def set_local_capture(client, enabled):
+    headers = capture_control_headers(client)
+    issued = client.post(CAPTURE_CONTROL, headers=headers)
+    assert issued.status_code == 200 and issued.json()["ticket"], issued.text
+    changed = client.put(CAPTURE_CONTROL, headers=headers, json={"ticket": issued.json()["ticket"], "enabled": enabled})
+    assert changed.status_code == 200 and changed.json()["active"] is enabled, changed.text
 
 
 def make_small_transport(path, *, microphone, seconds):
@@ -245,13 +258,14 @@ def test_services_open_only_on_demand_and_require_a_new_selection(stream, tmp_pa
     source = MonitorSource(FFMPEG, tmp_path, lambda: inventory, producer)
     profile = Config(data_dir=tmp_path / "profile", port=PORT, monitor_capture=True, isolated_instance=True, background=False)
     svc = Services(profile, monitor_source=source)
-    svc.settings.update({"capture_enabled": True, "capture_always_on": True, "ocr_auto": False})
+    svc.settings.update({"capture_always_on": True, "ocr_auto": False})
 
     with TestClient(create_app(profile, svc), base_url=f"http://127.0.0.1:{PORT}", client=("127.0.0.1", 50000)) as client:
         catalog = client.get("/api/monitors").json()
         selection = catalog["monitors"][0]["selection"]
         assert catalog["enabled"] and client.get("/api/devices").json()["devices"] == []
         assert client.put("/api/settings", json={"monitor": selection}).status_code == 200
+        set_local_capture(client, True)
         assert not starts and svc.engine._thread is None
 
         with svc.engine.request():

@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import threading
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from secrets import token_urlsafe
 from typing import Any, Callable, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from .errors import BairdError
+from .monitor_source import selected_monitor
 
 SourceMode = Literal["hdmi", "monitor", "overlay"]
 
@@ -50,13 +56,63 @@ def _focus(svc, expected: SourceArgs | None, live: bool) -> tuple:
     return mode, monitor, state.get("revision")
 
 
+@dataclass(frozen=True)
+class SourcePermit:
+    services: Any
+    expected: SourceArgs | None
+    focus: tuple
+
+    def check(self) -> None:
+        if _focus(self.services, self.expected, True) != self.focus:
+            raise BairdError("source_changed", "The source changed during the request. Look again.", status=409)
+
+    @contextmanager
+    def publish(self):
+        with self.services.sources.lock:
+            self.check()
+            yield
+
+
+_live_permit: ContextVar[SourcePermit | None] = ContextVar("live_source_permit", default=None)
+
+
+def capture_publication(svc):
+    """Take the call's permit before rendering. Hold its lock only while publishing."""
+    permit = _live_permit.get()
+    if permit is None or permit.services is not svc:
+        permit = SourcePermit(svc, None, _focus(svc, None, True))
+    return permit.publish()
+
+
 def call_on_source(svc, expected: SourceArgs | None, run: Callable[[], Any], *, live: bool = True) -> Any:
     """Bind a call to its source and check that fresh results still belong to it."""
     original = _focus(svc, expected, live)
-    result = run()
-    if live and _focus(svc, expected, live) != original:
-        raise BairdError("source_changed", "The source changed during the request. Look again.", status=409)
-    return result
+    if not live:
+        return run()
+    permit = SourcePermit(svc, expected, original)
+    token = _live_permit.set(permit)
+    try:
+        result = run()
+        permit.check()
+        return result
+    finally:
+        _live_permit.reset(token)
+
+
+CONTROL_LIFETIME = 600
+
+
+@dataclass(frozen=True)
+class CaptureControl:
+    session: str
+    revision: int
+    monitor: str
+    active: bool
+    expires: float
+
+
+def activation_required() -> BairdError:
+    return BairdError("source_activation_required", "Use the local screen switch in Baird's Settings.", status=403)
 
 
 class ProfileSources:
@@ -68,13 +124,14 @@ class ProfileSources:
 
     def __init__(self, services):
         self._services = services
-        self._lock = threading.RLock()
+        self.lock = threading.RLock()
         self._revision = 0
         self._undo: tuple[str, int, dict[str, str] | None] | None = None
+        self._controls: dict[str, CaptureControl] = {}
 
     def status(self, *, list_displays: bool = False) -> dict[str, Any]:
         svc = self._services
-        with self._lock:
+        with self.lock:
             settings = svc.settings.get()
             local = svc.monitor_source is not None
             selection = settings["monitor"] if local else None
@@ -93,8 +150,45 @@ class ProfileSources:
         if self._services.monitor_source is not None and any(
             before[key] != after[key] for key in ("capture_enabled", "monitor", "monitor_microphone")
         ):
-            with self._lock:
-                self._revision += 1
+            self.advance_revision()
+
+    def advance_revision(self) -> None:
+        self._revision += 1
+        self._controls.clear()
+
+    def capture_control(self, session: str) -> dict[str, Any]:
+        """Issue a single-use control for the display shown to the person."""
+        with self.lock:
+            state = self.status(list_displays=True)
+            selection = self._services.settings["monitor"]
+            display = next((item for item in state["monitors"] if item["selection"] == selection), None)
+            if display is None or state["blocked"]:
+                return {"active": False, "display": None, "ticket": None}
+            now = time.monotonic()
+            self._controls = {key: grant for key, grant in self._controls.items() if grant.expires > now}
+            if len(self._controls) >= 64:
+                self._controls.pop(next(iter(self._controls)))
+            ticket = token_urlsafe(32)
+            self._controls[ticket] = CaptureControl(session, self._revision, state["monitor"],
+                                                    state["active"], now + CONTROL_LIFETIME)
+            shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
+            return {"active": state["active"], "display": shown, "ticket": ticket}
+
+    def set_capture(self, *, session: str, ticket: str, enabled: bool) -> None:
+        with self.lock:
+            grant = self._controls.get(ticket)
+            if grant is None or grant.session != session:
+                raise activation_required()
+            del self._controls[ticket]
+            state = self.status()
+            if (grant.expires <= time.monotonic() or grant.revision != self._revision or state["blocked"]
+                    or grant.monitor != state["monitor"] or grant.active == enabled):
+                raise activation_required()
+            if enabled:
+                svc = self._services
+                # Verify the current layout again. A ticket may be open while the desktop changes.
+                selected_monitor(svc.settings["monitor"], svc.monitor_source.inventory())
+            self._services.apply_settings({"capture_enabled": enabled})
 
     def _check_recording(self) -> None:
         if self._services.library.recorder.status()["state"] in ("recording", "paused", "finishing"):
@@ -102,7 +196,7 @@ class ProfileSources:
 
     def select(self, mode: SourceMode, monitor: str | None = None) -> dict[str, Any]:
         svc = self._services
-        with self._lock:
+        with self.lock:
             state = self.status()
             if mode != state["mode"]:
                 raise BairdError("capture_unavailable", "This source is unavailable in the current profile.",
@@ -127,7 +221,7 @@ class ProfileSources:
             return {**self.status(), "undo_token": token}
 
     def undo(self, token: str) -> dict[str, Any]:
-        with self._lock:
+        with self.lock:
             if self._undo is None or self._undo[:2] != (token, self._revision):
                 raise BairdError("conflict", "That source change can no longer be undone.")
             self._check_recording()
