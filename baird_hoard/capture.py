@@ -81,6 +81,7 @@ class CaptureEngine:
         self._proc_graceful = self._graceful_stop
         self.on_state = on_state
         self._listeners: list[Listener] = []
+        self._listener_interest: dict[Listener, Callable[[], bool]] = {}
         self._lock = threading.RLock()
         self._privacy_lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
@@ -111,14 +112,17 @@ class CaptureEngine:
 
     # ------------------------------------------------------------------ listeners
 
-    def add_listener(self, fn: Listener) -> None:
+    def add_listener(self, fn: Listener, *, interested: Callable[[], bool] | None = None) -> None:
         with self._lock:
             self._listeners.append(fn)
+            if interested is not None:
+                self._listener_interest[fn] = interested
 
     def remove_listener(self, fn: Listener) -> None:
         with self._lock:
             if fn in self._listeners:
                 self._listeners.remove(fn)
+                self._listener_interest.pop(fn, None)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -685,8 +689,10 @@ class CaptureEngine:
                 with self._lock:
                     if self._privacy_block is not None:
                         continue
-                    listeners = list(self._listeners)
-                for fn in listeners:
+                    listeners = [(fn, self._listener_interest.get(fn)) for fn in self._listeners]
+                for fn, interested in listeners:
+                    if local is not None and interested is not None and not interested():
+                        continue
                     if local is not None and not self._check_local_policy(local):
                         break
                     publication = gate.publication() if gate is not None else nullcontext(True)

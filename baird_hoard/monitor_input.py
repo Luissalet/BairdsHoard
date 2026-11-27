@@ -39,26 +39,76 @@ def avi_header(width: int, height: int, fps: int, channels: int) -> bytes:
     )
 
 
+class DesktopSampler:
+    """Keep the latest desktop frame independently of the PCM clock."""
+
+    def __init__(self, monitor, frame_bytes, frames, gate, fps, capture_stopped):
+        self.packet = _chunk(b"00db", bytes(frame_bytes))
+        self.error: Exception | None = None
+        self.ready = threading.Event()
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._sample, args=(monitor, frame_bytes, frames, gate, fps, capture_stopped),
+                                       name="baird-desktop-sampler", daemon=True)
+
+    def _sample(self, monitor, frame_bytes, frames, gate, fps, capture_stopped):
+        try:
+            if capture_stopped.is_set():
+                return
+            with ExitStack() as owned:
+                grab = gate.acquire("video", lambda: owned.enter_context(frames(monitor)))
+                def pull():
+                    if self.stop.is_set() or capture_stopped.is_set():
+                        return None
+                    return grab()
+
+                period = 1 / fps
+                while not (self.stop.is_set() or capture_stopped.is_set()):
+                    started = time.monotonic()
+                    picture = gate.acquire("video", pull)
+                    if picture is not None:
+                        if len(picture) != frame_bytes:
+                            raise ValueError("The desktop frame has an unexpected size.")
+                        self.packet = _chunk(b"00db", picture)
+                    self.ready.set()
+                    # Slow pulls must leave room for the audio helper to acquire its own permits.
+                    self.stop.wait(period if picture is None else max(0, period - (time.monotonic() - started)))
+        except Exception as error:
+            self.error = error
+        finally:
+            self.ready.set()
+
+    def close(self):
+        self.stop.set()
+        # The producer supervisor still bounds process shutdown. A normal exit
+        # must let an admitted desktop pull settle its durable permission first.
+        self.thread.join()
+
+
 def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
     width, height = size
     frame_bytes = width * height * 4
     samples = AUDIO_RATE // fps * channels * 2
-    with ExitStack() as owned:
-        grab = gate.acquire("video", lambda: owned.enter_context(frames(monitor)))
+    desktop = DesktopSampler(monitor, frame_bytes, frames, gate, fps, stop)
+    desktop.thread.start()
+    try:
+        while not desktop.ready.wait(0.05):
+            if stop.is_set():
+                return
         sink.write(avi_header(width, height, fps, channels))
-        last = bytes(frame_bytes)
         while not stop.is_set():
             audio = pcm.read(samples)
-            if len(audio) != samples:
+            if desktop.error is not None:
+                raise desktop.error
+            if stop.is_set() or len(audio) != samples:
                 return
-            picture = gate.acquire("video", grab)
-            if picture is not None:
-                if len(picture) != frame_bytes:
-                    raise ValueError("The desktop frame has an unexpected size.")
-                last = picture
-            sink.write(_chunk(b"00db", last))
+            gate.check()
+            # The helper emits clocked, continuous PCM, including source silence.
+            # Pair every block with the last frame, even when DXGI has no update.
+            sink.write(desktop.packet)
             sink.write(_chunk(b"01wb", audio))
             sink.flush()
+    finally:
+        desktop.close()
 
 
 class AudioGrants:

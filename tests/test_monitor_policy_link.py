@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import threading
+import time
 from contextlib import contextmanager
 from types import ModuleType
 
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from baird_hoard import capture, monitor_windows, monitor_worker
 from baird_hoard.config import Config
+from baird_hoard.errors import BairdError
 from baird_hoard.main import create_app
 from baird_hoard.monitor_input import feed_samples
 from baird_hoard.monitor_privacy import configured_policy
@@ -97,7 +99,7 @@ def test_default_monitor_command_connects_configured_hub(monkeypatch, tmp_path, 
     assert command[-2:] == ["--policy-provider", "monitor_test_hub:connect"]
     monkeypatch.setattr(sys, "argv", command[2:])
 
-    reads, acquired = [], []
+    reads, acquired, acquired_at_cutoff = [], [], []
     feed = io.BytesIO()
 
     @contextmanager
@@ -113,8 +115,16 @@ def test_default_monitor_command_connects_configured_hub(monkeypatch, tmp_path, 
             reads.append(length)
             if len(reads) == 2:
                 hub.change(**policy_change)
+                acquired_at_cutoff.extend(acquired)
                 if "audio_excluded" not in policy_change:
-                    return bytes(length)  # Video must independently deny the next pull.
+                    deadline = time.monotonic() + 3
+                    while time.monotonic() < deadline:
+                        try:
+                            self.gate.check()
+                        except BairdError:
+                            return bytes(length)  # The separate video sampler detected the cutoff.
+                        time.sleep(0.005)
+                    pytest.fail("The video sampler did not observe the policy change")
             return self.gate.acquire("audio", lambda: self.block(length))
 
         def block(self, length):
@@ -138,7 +148,8 @@ def test_default_monitor_command_connects_configured_hub(monkeypatch, tmp_path, 
     monkeypatch.setattr(monitor_worker, "open_guarded_encoder", open_double)
     assert monitor_worker.main() == 1
     assert linked_scopes == ["connected", "connected"]
-    assert acquired == ["audio", "video"]
+    assert "video" in acquired and acquired.count("audio") == 1
+    assert acquired == acquired_at_cutoff
     assert len(reads) == 2 and feed.getvalue().count(b"00db") == 1
     assert json.loads(capsys.readouterr().err)["code"] == cutoff
 

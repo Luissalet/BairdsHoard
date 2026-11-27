@@ -27,6 +27,7 @@ SOFTWARE = "libx264"
 HARDWARE = {0x10DE: "h264_nvenc", 0x1002: "h264_amf", 0x8086: "h264_qsv"}
 LAYOUT_POLL_S = 0.75
 START_TIMEOUT_S = 9.0
+TRANSPORT_FLUSH_S = 0.10
 
 
 class EncoderStartError(RuntimeError):
@@ -96,7 +97,7 @@ def ffmpeg_command(ffmpeg: str, monitor: DesktopMonitor, encoder: str, microphon
         else:
             args += ["-forced_idr", "1", "-async_depth", "1", "-adaptive_i", "0"]
     return [*args, "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-            "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0",
+            "-mpegts_flags", "+resend_headers", "-muxdelay", "0", "-muxpreload", "0", "-flush_packets", "1",
             "-f", "mpegts", "pipe:1"]
 
 
@@ -157,6 +158,7 @@ class EncoderAttempt:
         self.video_errors = deque(maxlen=4)
         self.grants = grants
         self.feed_error: Exception | None = None
+        self.feeder: threading.Thread | None = None
         self.levels = grants.levels if grants is not None else {}
         self.readers = [
             threading.Thread(target=self._read, daemon=True),
@@ -209,6 +211,8 @@ class EncoderAttempt:
                 pass  # The worker job closes remaining handles on exit.
         for reader in self.readers:
             reader.join(timeout=0.5)
+        if self.feeder is not None:
+            self.feeder.join()
         self.video.stdout.close()
         self.video.stderr.close()
         self.audio.stderr.close()
@@ -226,9 +230,8 @@ class EncoderAttempt:
             finally:
                 self.audio.stdout.close()
 
-        thread = threading.Thread(target=feed, daemon=True)
-        self.readers.append(thread)
-        thread.start()
+        self.feeder = threading.Thread(target=feed, daemon=True)
+        self.feeder.start()
 
 
 @contextmanager
@@ -275,9 +278,11 @@ def open_guarded_encoder(audio_command, command, monitor, frames, dimensions, ga
         session.start_feeder(monitor, frames, dimensions, gate, microphone)
         yield session
     finally:
-        session.close()
-        for thread in grants.threads:
-            thread.join(timeout=0.5)
+        try:
+            session.close()
+        finally:
+            for thread in grants.threads:
+                thread.join()
 
 
 def _same_output(expected: DesktopMonitor, resolve) -> None:
@@ -288,16 +293,14 @@ def _same_output(expected: DesktopMonitor, resolve) -> None:
 def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop, sink, event, gate=None) -> None:
     # Keep failed hardware attempts private. A retry starts an entirely new stream.
     pending = bytearray()
+    delivery = bytearray()
     initial = TsBuffer()
     started = False
     now = time.monotonic()
     deadline, next_check, next_stats, bytes_sent = now + START_TIMEOUT_S, now + LAYOUT_POLL_S, now + 1.0, 0
+    next_delivery = now
     while not stop.is_set():
-        if gate is not None:
-            gate.preflight()
         chunk = session.chunk(0.15)
-        if gate is not None:
-            gate.preflight()
         now = time.monotonic()
         if now >= next_check:
             _same_output(monitor, resolve)
@@ -311,20 +314,31 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
                 initial.feed(chunk)
                 pending.extend(chunk)
                 if initial.latest()[1] and initial.audio_pid is not None:
+                    if gate is not None:
+                        gate.verify_publication()
                     _same_output(monitor, resolve)
                     event("ready", device=monitor.name, encoder=encoder,
                           input={"width": monitor.width, "height": monitor.height}, fps=FPS)
                     sink.write(pending)
+                    sink.flush()
                     bytes_sent += len(pending)
                     pending.clear()
                     started = True
                     initial.reset()
             else:
-                sink.write(chunk)
-                bytes_sent += len(chunk)
-        if started:
-            if chunk:
+                delivery.extend(chunk)
+        # Many small encoder writes can otherwise each contend with native
+        # acquisitions for the receiver's policy and delivery leases.
+        if now >= next_delivery or len(delivery) >= 64 * 1024:
+            if gate is not None:
+                gate.verify_publication()
+            if delivery:
+                sink.write(delivery)
                 sink.flush()
+                bytes_sent += len(delivery)
+                delivery.clear()
+            next_delivery = now + TRANSPORT_FLUSH_S
+        if started:
             if now >= next_stats:
                 elapsed = now - (next_stats - 1.0)
                 event("stats", kbps=round(bytes_sent * 8 / (elapsed * 1000)), **session.levels)

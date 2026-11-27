@@ -157,10 +157,12 @@ def test_revision_cutoff_serializes_with_an_inflight_acquisition():
     assert sequence == ["covered frame", "cutoff"]
 
 
-def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
+def test_feeder_stops_repeating_when_desktop_policy_is_revoked():
     hub = HubDouble()
-    gate = guard(hub)
+    blocked = threading.Event()
+    gate = AcquisitionGate(hub, choose(MONITOR, [MONITOR]), on_block=lambda _: blocked.set())
     frames_taken = []
+    pulls_at_cutoff = []
     out = io.BytesIO()
 
     class Pcm:
@@ -170,6 +172,8 @@ def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
             self.reads += 1
             if self.reads == 2:
                 hub.change(excluded=True)
+                pulls_at_cutoff.extend(frames_taken)
+                assert blocked.wait(4)
             return bytes(n)
 
     @contextmanager
@@ -181,7 +185,7 @@ def test_feeder_checks_privacy_after_pcm_wait_and_before_every_frame():
 
     with pytest.raises(BairdError) as error:
         feed_samples(out, Pcm(), MONITOR, (8, 8), frames, gate, threading.Event(), 30, 2)
-    assert error.value.code == "application_excluded" and frames_taken == ["acquired"]
+    assert error.value.code == "application_excluded" and frames_taken == pulls_at_cutoff
     assert out.getvalue().count(b"00db") == 1
 
 
@@ -338,6 +342,45 @@ def test_silent_encoder_still_observes_cut_and_drops_inflight_transport():
         monitor_worker.stream_attempt(Attempt(), MONITOR, monitor_worker.SOFTWARE, lambda: MONITOR,
                                       threading.Event(), sink, lambda *_a, **_kw: None, gate)
     assert error.value.code == "privacy_blocked" and sink.getvalue() == b""
+
+
+def test_transport_revalidates_privacy_without_a_new_device_grant():
+    class PublicationPolicy(HubDouble):
+        def lease(self, *args):
+            pytest.fail("Publishing already encoded bytes must not claim a device")
+
+    hub = PublicationPolicy()
+    gate = guard(hub)
+    gate.verify_publication()
+    hub.change(audio_excluded=True)
+    with pytest.raises(BairdError) as error:
+        gate.verify_publication()
+    assert error.value.code == "application_excluded" and hub.reads == 2
+
+
+def test_monitor_batches_small_writes_before_a_guarded_delivery(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(monitor_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(monitor_worker, "TsBuffer", lambda: SimpleNamespace(
+        feed=lambda _: None, latest=lambda: (b"", 1), audio_pid=2, reset=lambda: None,
+    ))
+    stop = threading.Event()
+    captured = []
+    hub = HubDouble()
+    gate = guard(hub)
+    schedule = iter(((0.00, b"start"), (0.02, b"a"), (0.04, b"b"), (0.11, b"c"), (0.23, None)))
+
+    def chunk(_timeout):
+        clock[0], data = next(schedule)
+        if data is None:
+            stop.set()
+        return data
+
+    attempt = SimpleNamespace(chunk=chunk, levels={})
+    output = SimpleNamespace(write=lambda data: captured.append(bytes(data)), flush=lambda: None)
+    monitor_worker.stream_attempt(attempt, MONITOR, monitor_worker.SOFTWARE, lambda: MONITOR, stop,
+                                  output, lambda *_a, **_kw: None, gate)
+    assert captured == [b"start", b"abc"]
 
 
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not available")

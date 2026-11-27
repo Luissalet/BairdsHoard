@@ -143,7 +143,10 @@ class Services:
             if state.private or state.excluded or state.audio_excluded:
                 yield False
                 return
-            with authority.lease(display.id, display.layout, state.revision, "video") as confirmed:
+            publication = getattr(authority, "publication", None)
+            guard = (publication(display.id, display.layout, state.revision) if callable(publication)
+                     else authority.lease(display.id, display.layout, state.revision, "video"))
+            with guard as confirmed:
                 yield confirmed
 
         return ScreenBackend(displays, lambda display: BoundMonitorSource(monitor, display.id, display.layout),
