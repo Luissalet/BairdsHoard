@@ -292,11 +292,9 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
     now = time.monotonic()
     deadline, next_check, next_stats, bytes_sent = now + START_TIMEOUT_S, now + LAYOUT_POLL_S, now + 1.0, 0
     while not stop.is_set():
-        if gate is not None:
-            gate.preflight()
         chunk = session.chunk(0.15)
         if gate is not None:
-            gate.preflight()
+            gate.verify_publication()
         now = time.monotonic()
         if now >= next_check:
             _same_output(monitor, resolve)

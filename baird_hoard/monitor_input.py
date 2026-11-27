@@ -63,7 +63,8 @@ class DesktopSampler:
                             raise ValueError("The desktop frame has an unexpected size.")
                         self.packet = _chunk(b"00db", picture)
                     self.ready.set()
-                    self.stop.wait(max(0, period - (time.monotonic() - started)))
+                    # Slow pulls must leave room for the audio helper to acquire its own permits.
+                    self.stop.wait(period if picture is None else max(0, period - (time.monotonic() - started)))
         except Exception as error:
             self.error = error
         finally:

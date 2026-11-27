@@ -344,6 +344,20 @@ def test_silent_encoder_still_observes_cut_and_drops_inflight_transport():
     assert error.value.code == "privacy_blocked" and sink.getvalue() == b""
 
 
+def test_transport_revalidates_privacy_without_a_new_device_grant():
+    class PublicationPolicy(HubDouble):
+        def lease(self, *args):
+            pytest.fail("Publishing already encoded bytes must not claim a device")
+
+    hub = PublicationPolicy()
+    gate = guard(hub)
+    gate.verify_publication()
+    hub.change(audio_excluded=True)
+    with pytest.raises(BairdError) as error:
+        gate.verify_publication()
+    assert error.value.code == "application_excluded" and hub.reads == 2
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not available")
 @pytest.mark.parametrize("microphone", [False, True])
 def test_guarded_pipe_encodes_avi_to_keyed_transport_without_devices(microphone):

@@ -79,6 +79,16 @@ class AcquisitionGate:
             self._on_block(error)
         raise error
 
+    def _validate(self, state: PolicySnapshot | None, *, audio: bool) -> PolicySnapshot:
+        if (not isinstance(state, PolicySnapshot) or type(state.revision) is not int
+                or any(type(flag) is not bool for flag in (state.private, state.excluded, state.audio_excluded))):
+            self._deny("policy_unavailable")
+        if state.private:
+            self._deny("privacy_blocked")
+        if state.excluded or (audio and state.audio_excluded):
+            self._deny("application_excluded")
+        return state
+
     def acquire(self, medium: Medium, operation: Callable[[], T]) -> T:
         with self._lock, ExitStack() as held:
             if self._blocked is not None:
@@ -92,14 +102,7 @@ class AcquisitionGate:
                 except Exception:
                     self._deny("policy_unavailable")
                 self._expires = self._clock() + POLICY_TTL
-            state = self._current
-            if (not isinstance(state, PolicySnapshot) or type(state.revision) is not int
-                    or any(type(flag) is not bool for flag in (state.private, state.excluded, state.audio_excluded))):
-                self._deny("policy_unavailable")
-            if state.private:
-                self._deny("privacy_blocked")
-            if state.excluded or (medium == "audio" and state.audio_excluded):
-                self._deny("application_excluded")
+            state = self._validate(self._current, audio=medium == "audio")
             try:
                 confirmed = held.enter_context(policy.lease(*self._selection, state.revision, medium))
             except Exception:
@@ -120,6 +123,20 @@ class AcquisitionGate:
                         self._deny("application_excluded")
                 self._deny("policy_unavailable")
             return operation()
+
+    def verify_publication(self) -> None:
+        """Read the current scope before releasing encoded bytes. This does not pull a device."""
+        with self._lock:
+            self.check()
+            if self._policy is None:
+                self._deny("policy_unavailable")
+            try:
+                state = self._policy.read(*self._selection)
+            except Exception:
+                self._deny("policy_unavailable")
+            state = self._validate(state, audio=True)
+            if self._current is not None and state.revision != self._current.revision:
+                self._deny("policy_unavailable")
 
     def preflight(self) -> None:
         self.acquire("video", lambda: None)
