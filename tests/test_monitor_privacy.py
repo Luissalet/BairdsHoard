@@ -358,6 +358,31 @@ def test_transport_revalidates_privacy_without_a_new_device_grant():
     assert error.value.code == "application_excluded" and hub.reads == 2
 
 
+def test_monitor_batches_small_writes_before_a_guarded_delivery(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(monitor_worker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(monitor_worker, "TsBuffer", lambda: SimpleNamespace(
+        feed=lambda _: None, latest=lambda: (b"", 1), audio_pid=2, reset=lambda: None,
+    ))
+    stop = threading.Event()
+    captured = []
+    hub = HubDouble()
+    gate = guard(hub)
+    schedule = iter(((0.00, b"start"), (0.02, b"a"), (0.04, b"b"), (0.11, b"c"), (0.23, None)))
+
+    def chunk(_timeout):
+        clock[0], data = next(schedule)
+        if data is None:
+            stop.set()
+        return data
+
+    attempt = SimpleNamespace(chunk=chunk, levels={})
+    output = SimpleNamespace(write=lambda data: captured.append(bytes(data)), flush=lambda: None)
+    monitor_worker.stream_attempt(attempt, MONITOR, monitor_worker.SOFTWARE, lambda: MONITOR, stop,
+                                  output, lambda *_a, **_kw: None, gate)
+    assert captured == [b"start", b"abc"]
+
+
 @pytest.mark.skipif(not FFMPEG, reason="ffmpeg not available")
 @pytest.mark.parametrize("microphone", [False, True])
 def test_guarded_pipe_encodes_avi_to_keyed_transport_without_devices(microphone):

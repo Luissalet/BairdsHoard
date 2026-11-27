@@ -27,6 +27,7 @@ SOFTWARE = "libx264"
 HARDWARE = {0x10DE: "h264_nvenc", 0x1002: "h264_amf", 0x8086: "h264_qsv"}
 LAYOUT_POLL_S = 0.75
 START_TIMEOUT_S = 9.0
+TRANSPORT_FLUSH_S = 0.10
 
 
 class EncoderStartError(RuntimeError):
@@ -287,14 +288,14 @@ def _same_output(expected: DesktopMonitor, resolve) -> None:
 def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop, sink, event, gate=None) -> None:
     # Keep failed hardware attempts private. A retry starts an entirely new stream.
     pending = bytearray()
+    delivery = bytearray()
     initial = TsBuffer()
     started = False
     now = time.monotonic()
     deadline, next_check, next_stats, bytes_sent = now + START_TIMEOUT_S, now + LAYOUT_POLL_S, now + 1.0, 0
+    next_delivery = now
     while not stop.is_set():
         chunk = session.chunk(0.15)
-        if gate is not None:
-            gate.verify_publication()
         now = time.monotonic()
         if now >= next_check:
             _same_output(monitor, resolve)
@@ -308,20 +309,31 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
                 initial.feed(chunk)
                 pending.extend(chunk)
                 if initial.latest()[1] and initial.audio_pid is not None:
+                    if gate is not None:
+                        gate.verify_publication()
                     _same_output(monitor, resolve)
                     event("ready", device=monitor.name, encoder=encoder,
                           input={"width": monitor.width, "height": monitor.height}, fps=FPS)
                     sink.write(pending)
+                    sink.flush()
                     bytes_sent += len(pending)
                     pending.clear()
                     started = True
                     initial.reset()
             else:
-                sink.write(chunk)
-                bytes_sent += len(chunk)
-        if started:
-            if chunk:
+                delivery.extend(chunk)
+        # Many small encoder writes can otherwise each contend with native
+        # acquisitions for the receiver's policy and delivery leases.
+        if now >= next_delivery or len(delivery) >= 64 * 1024:
+            if gate is not None:
+                gate.verify_publication()
+            if delivery:
+                sink.write(delivery)
                 sink.flush()
+                bytes_sent += len(delivery)
+                delivery.clear()
+            next_delivery = now + TRANSPORT_FLUSH_S
+        if started:
             if now >= next_stats:
                 elapsed = now - (next_stats - 1.0)
                 event("stats", kbps=round(bytes_sent * 8 / (elapsed * 1000)), **session.levels)
