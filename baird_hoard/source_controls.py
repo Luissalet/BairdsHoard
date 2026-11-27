@@ -37,6 +37,7 @@ class ScreenBackend:
     visible_apps: Callable[[str], Iterable[str] | None]
     read_scoped: Callable[[Display], ScreenPolicy] | None = None
     permit: Callable[[Display], ContextManager[bool]] | None = None
+    prepare_policy: Callable[[Display], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +155,12 @@ class SourceControls:
                     log.debug("Screen policy subscription failed", exc_info=True)
                     gate.block(None)
             try:
+                if gate.blocked is None and self._backend.prepare_policy is not None:
+                    try:
+                        self._backend.prepare_policy(display)
+                    except Exception:
+                        log.debug("Screen capture policy preparation failed", exc_info=True)
+                        gate.block(None)
                 if gate.check() is None:
                     with gate.publication() as allowed:
                         if allowed:

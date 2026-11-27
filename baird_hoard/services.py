@@ -28,6 +28,7 @@ from .monitor_source import BoundMonitorSource, MonitorSource, normalize_selecti
 from .native import NATIVE_DIR
 from .ocr import OcrIndex, fold
 from .overlay import CopilotOverlay, OverlayDisplay, selected_overlay_display
+from .production_policy import CONFIG_NAME as POLICY_CONFIG_NAME, configured_binding
 from .recording_search import RecordingSearch
 from .screen_privacy import ScreenPolicy, ScreenPolicySubscription
 from .source_controls import Display, ScreenBackend, Selection, SourceControls
@@ -56,14 +57,13 @@ class Services:
         self._last_state = "off"
         self.monitor_source = None
         if config.monitor_capture and not config.synthetic_capture:
-            self.monitor_source = monitor_source or MonitorSource(
-                self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
-            )
+            self.monitor_source = monitor_source or self._make_monitor_source()
             if self.settings["capture_enabled"]:
                 self.settings.update({"capture_enabled": False})
         # An injected producer without an authority can still exercise the fixed profile contract.
         native_selector = self.monitor_source is not None and (
-            monitor_source is None or self.monitor_source.policy_provider is not None or read_screen_policy is not None)
+            monitor_source is None or self.monitor_source.policy_provider is not None
+            or self.monitor_source.production_policy is not None or read_screen_policy is not None)
         fixed_monitor = self.monitor_source is not None and not native_selector
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source if fixed_monitor else None
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
@@ -118,13 +118,20 @@ class Services:
         self.copilot.capture_publication = lambda: capture_publication(self)
         self.started = time.time()
 
+    def _make_monitor_source(self) -> MonitorSource:
+        config = self.config
+        provider = config.monitor_policy_provider
+        binding = configured_binding(config.data_dir.resolve() / POLICY_CONFIG_NAME) if not provider else None
+        return MonitorSource(self.ffmpeg, config.work_dir, policy_provider=provider, production_policy=binding)
+
     @staticmethod
     def _monitor_backend(monitor: MonitorSource, read_override) -> ScreenBackend:
         def displays():
             return [Display(row["id"], row["name"], row["width"], row["height"], row["x"], row["y"],
                             row["selection"]["layout"]) for row in monitor.list_monitors()]
 
-        authority = configured_policy(monitor.policy_provider)
+        binding = monitor.production_policy if read_override is None else None
+        authority = binding.authority() if binding is not None else configured_policy(monitor.policy_provider)
 
         def snapshot(display: Display) -> PolicySnapshot:
             state = authority.read(display.id, display.layout) if authority is not None else None
@@ -136,6 +143,9 @@ class Services:
         def read(display: Display) -> ScreenPolicy:
             state = snapshot(display)
             return ScreenPolicy(state.private, (), state.excluded or state.audio_excluded)
+
+        def prepare(display: Display):
+            binding.prepare(display.id, display.layout)
 
         @contextmanager
         def permit(display: Display):
@@ -151,7 +161,8 @@ class Services:
 
         return ScreenBackend(displays, lambda display: BoundMonitorSource(monitor, display.id, display.layout),
                              lambda _display: None, None if read_override is not None else read,
-                             permit if authority is not None else None)
+                             permit if authority is not None else None,
+                             prepare if binding is not None else None)
 
     def _overlay_display(self) -> OverlayDisplay | None:
         if self.engine.snapshot()["state"] != "running":
