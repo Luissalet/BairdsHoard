@@ -6,7 +6,7 @@ App id `baird`, service `bairds-hoard`, port 5232, MCP stdio bridge `mcp_server.
 
 - Show another computer's screen live (HDMI → AVerMedia GL310 / C875) in the Hoard window or a browser tab, with
   sound, < 1 s delay, no re-encoding.
-- With the monitor profile enabled, show an explicitly selected local display with system loopback and optional microphone. `source_list` reports the choice, activation and available identities. `source_select` stages a choice and `source_undo` restores the previous choice with a local display off. The person activates a local display in Baird. Capture, recording and copilot accept an optional `source` object to check the expected source.
+- With the monitor profile enabled, show an explicitly selected local display with system loopback and optional microphone. `source_list` reports the choice, activation and available identities. `source_select` stages a choice and `source_undo` restores the previous choice with a local display off. The person activates the local display with its switch in Baird's Settings. Revocation discards pending snapshots and copilot looks. Capture, recording and copilot accept an optional `source` object to check the expected source.
 - Screenshot of the current frame (PNG/JPG) — button, key `C`, `snapshot_save`, or `screen_look` (returns the image
   to the assistant; `save=false` leaves no file).
 - Save the last N seconds (default 30, up to the memory window of 10–600 s) as MP4 instantly — `B`, `clip_save`.
