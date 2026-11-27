@@ -343,6 +343,7 @@ class Library:
 
     def clip(self, seconds: Optional[float] = None) -> dict[str, Any]:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
+        publication = self.capture_publication()
         with self.engine.request():
             self.engine.wait_for_picture()
             ff = self._need_ffmpeg()
@@ -359,28 +360,33 @@ class Library:
             parts = source.since(secs)
         if not parts:
             raise BairdError("no_signal", "Nothing is in memory yet.")
-        tmp = self.config.work_dir / f"clip-{uuid.uuid4().hex[:8]}.ts"
-        tmp.write_bytes(b"".join(parts))
-        out = self._new_path("Clip", ".mp4", f" ({int(round(min(secs, kept)))} s)")
-        raw = self.config.work_dir / f"clip-{tmp.stem[5:]}-raw.mp4" if enhance_after else out
-        try:
-            proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp), "-map", "0:v:0",
-                              "-map", "0:a?", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", str(raw)], timeout=120)
-            if proc.returncode != 0 or not raw.is_file():
-                raw.unlink(missing_ok=True)
-                raise BairdError("failed", "Could not write the clip.", proc.stderr.decode("utf-8", "replace")[-300:])
-        finally:
-            tmp.unlink(missing_ok=True)
-        if enhance_after:
+        folder = self.folder
+        with TemporaryDirectory(prefix=".baird-capture-", dir=folder) as staging:
+            draft = Path(staging) / "clip.mp4"
+            raw = draft.with_name("source.mp4") if enhance_after else draft
+            tmp = self.config.work_dir / f"clip-{uuid.uuid4().hex[:8]}.ts"
             try:
-                fx = dict(self.settings["enhance"], hdr=False)  # a clip is shown anywhere: SDR
-                self.enhancer.enhance_file(raw, out, fx)
-                enhanced = True
-                raw.unlink(missing_ok=True)
-            except BairdError as exc:
-                log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
-                os.replace(raw, out)
-        return self._remember(out, origin="clip", enhanced=True if enhanced else None, **self._probe(out), probed=True)
+                tmp.write_bytes(b"".join(parts))
+                proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp),
+                                  "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                                  "-movflags", "+faststart", str(raw)], timeout=120)
+                if proc.returncode != 0 or not raw.is_file():
+                    raise BairdError("failed", "Could not write the clip.", proc.stderr.decode("utf-8", "replace")[-300:])
+            finally:
+                tmp.unlink(missing_ok=True)
+            if enhance_after:
+                try:
+                    fx = dict(self.settings["enhance"], hdr=False)  # Clips are SDR.
+                    self.enhancer.enhance_file(raw, draft, fx)
+                    enhanced = True
+                except BairdError as exc:
+                    log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
+                    os.replace(raw, draft)
+            metadata = self._probe(draft)
+            with publication, self._lock:
+                out = self._new_path("Clip", ".mp4", f" ({int(round(min(secs, kept)))} s)", folder=folder)
+                os.replace(draft, out)
+                return self._remember(out, origin="clip", enhanced=True if enhanced else None, **metadata, probed=True)
 
     def enhance_copy(self, name: str, fx: dict[str, Any]) -> dict[str, Any]:
         """Start an enhanced copy of a video next to it (background job, the original stays as it is); returns the job."""
