@@ -219,9 +219,10 @@ class Library:
         return None
 
     def snapshot(self, fmt: Optional[str] = None, region: Optional[dict[str, Any]] = None, *,
-                 prefix: Optional[str] = None, origin: Optional[str] = None) -> dict[str, Any]:
+                 prefix: Optional[str] = None, origin: Optional[str] = None,
+                 finalizes_call: bool = False) -> dict[str, Any]:
         """Save the current picture (or only ``region`` of it); returns its description."""
-        publication = self.capture_publication()
+        publication = self.capture_publication(finalizes_call=finalizes_call)
         ff = self._need_ffmpeg()
         fmt = (fmt or self.settings["snapshot_format"]).lower()
         if fmt not in ("png", "jpg"):

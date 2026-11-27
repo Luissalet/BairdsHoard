@@ -344,6 +344,34 @@ def test_pending_snapshot_never_reaches_library_or_ocr(rendered_picture, monkeyp
     assert set(svc.library._index) == {published} and len(notified) == 1
 
 
+@pytest.mark.parametrize(("tool", "expected_status"), [("snapshot_save", 200), ("screen_look", 403)])
+def test_snapshot_receipt_and_live_image_after_revocation(rendered_picture, monkeypatch, tool, expected_status):
+    client, svc = rendered_picture
+    published = []
+    monkeypatch.setattr(svc.buffer, "latest", lambda: (b"synthetic-transport", 1))
+
+    def render(argv, **kwargs):
+        Path(argv[-1]).write_bytes(b"synthetic-png")
+        return SimpleNamespace(returncode=0, stderr=b"")
+
+    def disarm_after_publication(path):
+        published.append(path)
+        svc.apply_settings({"capture_enabled": False})
+
+    monkeypatch.setattr(svc.library, "_run", render)
+    monkeypatch.setattr(svc.library, "on_new_image", disarm_after_publication)
+    monkeypatch.setattr(svc.library, "image_for_model", lambda *args: {"mime": "image/png", "base64": "cGl4ZWxz"})
+    response = agent(client, tool, {"source": SOURCE})
+    assert response.status_code == expected_status, response.text
+    assert len(published) == 1 and published[0].read_bytes() == b"synthetic-png"
+    assert set(svc.library._index) == {published[0].name} and not svc.settings["capture_enabled"]
+    if tool == "snapshot_save":
+        assert response.json()["name"] == published[0].name
+        assert Path(response.json()["path"]) == published[0]
+    else:
+        assert response.json()["code"] == "source_off" and "cGl4ZWxz" not in response.text
+
+
 @pytest.mark.parametrize("pipeline", ["plain", "live-enhanced", "rendered", "fallback"])
 def test_pending_clip_never_reaches_library(rendered_picture, monkeypatch, pipeline):
     client, svc = rendered_picture
