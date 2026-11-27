@@ -14,7 +14,7 @@ The local browser control starts from a trusted click or keyboard action. To tur
 
 | Code | Meaning |
 | --- | --- |
-| `source_off` | The person can turn on the selected local source in Baird. The live handler has not run. |
+| `source_off` (HTTP 403) | The selected local source is off. The person can turn it on in Baird. The live handler has not run and the response contains no image. |
 | `source_mismatch` | The requested mode or display differs from the current choice. Call `source_list` again. |
 | `source_changed` | The selection or activation changed during a live call. Start a fresh look. |
 | `source_activation_required` | A tool tried to change the local capture setting. The person owns activation. |
