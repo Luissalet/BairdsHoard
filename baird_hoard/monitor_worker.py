@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .errors import BairdError
-from .monitor_input import AudioGrants, feed_samples
+from .monitor_input import AUDIO_RATE, AudioBlocks, AudioGrants, feed_samples
 from .monitor_privacy import AcquisitionGate, BLOCK_CODES, CapturePolicy, configured_policy
 from .monitor_source import DesktopMonitor, RESELECT, normalize_selection, selected_monitor, windows_inventory
 from .native import NATIVE_DIR, NO_WINDOW, bind_to_app, csc_path
@@ -81,15 +81,16 @@ def ffmpeg_command(ffmpeg: str, monitor: DesktopMonitor, encoder: str, microphon
             args += ["-init_hw_device", "qsv=encoder@display"]
         args += ["-filter_hw_device", "encoder" if encoder == "h264_qsv" else "display"]
     inputs = ["-f", "avi"] if video is None else ["-f", "s16le", "-ar", "48000", "-ac", "4" if microphone else "2"]
+    cadence = ["-fps_mode", "passthrough", "-enc_time_base", f"1/{FPS}"] if video is None else ["-r", str(FPS)]
     args += [*inputs, "-i", "pipe:0",
-             "-filter_complex", graph, "-map", "[desktop]", *audio,
-             "-r", str(FPS), "-c:v", encoder, "-g", str(FPS), "-bf", "0"]
+             "-filter_complex", graph, "-map", "[desktop]", *audio, *cadence,
+             "-c:v", encoder, "-g", str(FPS), "-bf", "0", "-force_key_frames", "expr:gte(t,n_forced)"]
     if encoder == SOFTWARE:
         args += ["-preset", "ultrafast", "-tune", "zerolatency", "-crf", "21", "-threads:v", "2",
                  "-sc_threshold", "0", "-keyint_min", str(FPS), "-profile:v", "high",
                  "-x264-params", "8x8dct=1:cabac=1"]
     else:
-        args += ["-b:v", "8M", "-maxrate", "10M", "-bufsize", "5M", "-force_key_frames", "expr:gte(t,n_forced)"]
+        args += ["-b:v", "8M", "-maxrate", "10M", "-bufsize", "5M"]
         if encoder == "h264_nvenc":
             args += ["-forced-idr", "1", "-preset", "p3", "-tune", "ll", "-zerolatency", "1", "-no-scenecut", "1"]
         elif encoder == "h264_amf":
@@ -159,6 +160,7 @@ class EncoderAttempt:
         self.grants = grants
         self.feed_error: Exception | None = None
         self.feeder: threading.Thread | None = None
+        self.pcm: AudioBlocks | None = None
         self.levels = grants.levels if grants is not None else {}
         self.readers = [
             threading.Thread(target=self._read, daemon=True),
@@ -213,22 +215,25 @@ class EncoderAttempt:
             reader.join(timeout=0.5)
         if self.feeder is not None:
             self.feeder.join()
+        if self.pcm is not None:
+            self.pcm.thread.join()
+            self.audio.stdout.close()
         self.video.stdout.close()
         self.video.stderr.close()
         self.audio.stderr.close()
 
     def start_feeder(self, monitor, frames, dimensions, gate, microphone):
+        channels = 4 if microphone else 2
+        pcm = self.pcm = AudioBlocks(self.audio.stdout, AUDIO_RATE // FPS * channels * 2, self.stop)
+
         def feed():
             try:
                 with self.video.stdin:
-                    feed_samples(self.video.stdin, self.audio.stdout, monitor, dimensions, frames, gate, self.stop,
-                                 FPS, 4 if microphone else 2)
+                    feed_samples(self.video.stdin, pcm, monitor, dimensions, frames, gate, self.stop, FPS, channels)
             except BrokenPipeError:
                 pass  # The encoder stopped accepting input.
             except Exception as error:
                 self.feed_error = error
-            finally:
-                self.audio.stdout.close()
 
         self.feeder = threading.Thread(target=feed, daemon=True)
         self.feeder.start()
@@ -313,7 +318,7 @@ def stream_attempt(session, monitor: DesktopMonitor, encoder: str, resolve, stop
             if not started:
                 initial.feed(chunk)
                 pending.extend(chunk)
-                if initial.latest()[1] and initial.audio_pid is not None:
+                if initial.latest()[1] and initial.has_audio:
                     if gate is not None:
                         gate.verify_publication()
                     _same_output(monitor, resolve)

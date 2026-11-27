@@ -82,5 +82,7 @@ def test_static_desktop_does_not_hold_back_timed_pcm():
     chunks = output.getvalue().split(b"movi", 1)[1]
     frame = b"00db" + struct.pack("<I", len(picture)) + picture
     audio = b"01wb" + struct.pack("<I", len(pcm_block)) + pcm_block
-    assert chunks == (frame + audio) * frames
+    empty_frame = b"00db" + bytes(4)
+    expected = b"".join((frame if tick % 3 == 0 else empty_frame) + audio for tick in range(frames))
+    assert chunks == expected
     assert len(acquired) > 1
