@@ -21,6 +21,7 @@ from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
 from baird_hoard.main import create_app
 from baird_hoard.monitor_source import MonitorSource
+from baird_hoard.screen_privacy import ScreenPolicy
 from baird_hoard.services import Services
 
 from .conftest import FFMPEG
@@ -605,6 +606,83 @@ def test_monitor_producer_can_use_the_controller_selection(tmp_path):
     assert svc.settings["monitor"] is None
     assert source.command_for(chosen, svc.settings) == ["mock-producer"]
     assert svc.engine._thread is None
+
+
+def test_persistent_local_features_require_a_gesture_and_apply_live(tmp_path, monkeypatch):
+    def unexpected_device(*args, **kwargs):
+        pytest.fail("a feature switch tried to open a capture device")
+
+    def privacy():
+        return ScreenPolicy(False, ())
+
+    monkeypatch.setattr(capture, "ensure_helper", unexpected_device)
+    config = Config(data_dir=tmp_path / "profile", port=PORT, isolated_instance=True, background=False)
+    source = MonitorSource(FFMPEG or "ffmpeg", tmp_path, lambda: [MONITOR], unexpected_device)
+    client_options = {"base_url": f"http://127.0.0.1:{PORT}", "client": ("127.0.0.1", 50000)}
+    monitor = CAPTURE_CONTROL + "?target=monitor_capture"
+    overlay = CAPTURE_CONTROL + "?target=overlay_mode"
+    svc = Services(config, monitor_source=source, read_screen_policy=privacy, confirm_capture=confirm_test_shortcut)
+
+    def change(client, control, enabled):
+        headers = capture_control_headers(client)
+        ticket = client.post(control, headers=headers).json()["ticket"]
+        assert ticket
+        response = client.put(control, headers=headers, json={"ticket": ticket, "enabled": enabled})
+        assert response.status_code == 200, response.text
+        assert response.json()["active"] is enabled
+
+    with TestClient(create_app(config, svc), **client_options) as client:
+        initial = agent(client, "source_list").json()
+        assert initial["modes"] == ["hdmi"] and initial["monitors"] == []
+        assert initial["local_features"] == {"monitor_capture": False, "overlay_mode": False}
+        assert client.get("/api/monitors").json() == {"enabled": False, "monitors": []}
+        headers = capture_control_headers(client)
+        assert client.post(monitor).status_code == 403
+        assert client.post(monitor, headers={**headers, "origin": "http://elsewhere.test"}).status_code == 403
+        assert client.post(monitor, headers={**headers, "Authorization": f"Bearer {svc.token}"}).status_code == 403
+        for target in initial["local_features"]:
+            assert client.put("/api/settings", json={target: True}).status_code == 403
+            rejected = agent(client, "settings_set", {target: True})
+            assert rejected.status_code == 400 and rejected.json()["code"] == "invalid"
+        assert client.post(overlay, headers=headers).json()["ticket"] is None
+
+        ticket = client.post(monitor, headers=headers).json()["ticket"]
+        assert client.put(overlay, headers=headers, json={"ticket": ticket, "enabled": True}).status_code == 403
+        monkeypatch.setattr(svc.sources, "_confirm", lambda *_: False)
+        denied = client.put(monitor, headers=headers, json={"ticket": ticket, "enabled": True})
+        assert denied.status_code == 403 and denied.json()["code"] == "source_approval_required"
+        assert not svc.settings["monitor_capture"] and svc.monitor_source is None
+        assert client.put(monitor, headers=headers, json={"ticket": ticket, "enabled": True}).status_code == 403
+
+        monkeypatch.setattr(svc.sources, "_confirm", confirm_test_shortcut)
+        change(client, monitor, True)
+        after = agent(client, "source_list").json()
+        assert after["mode"] == "hdmi" and after["modes"] == ["hdmi", "monitor"]
+        assert [screen["id"] for screen in after["monitors"]] == [MONITOR.id]
+        assert agent(client, "source_select", {**SOURCE, "mode": "overlay"}).status_code == 503
+        change(client, overlay, True)
+        after = agent(client, "source_list").json()
+        assert after["modes"] == ["hdmi", "monitor", "overlay"]
+        assert after["local_features"] == {"monitor_capture": True, "overlay_mode": True}
+        selected = agent(client, "source_select", {**SOURCE, "mode": "overlay"}).json()
+        assert not selected["active"] and svc.engine._thread is None
+
+    restarted = Services(config, monitor_source=source, read_screen_policy=privacy, confirm_capture=confirm_test_shortcut)
+    with TestClient(create_app(config, restarted), **client_options) as client:
+        after = agent(client, "source_list").json()
+        assert after["mode"] == "overlay" and not after["active"] and after["monitor"] == MONITOR.id
+        assert agent(client, "screen_look", {"source": {**SOURCE, "mode": "overlay"}, "save": False}).status_code == 403
+        set_local_capture(client, True)
+        assert restarted.engine.source_enabled()
+        change(client, overlay, False)
+        after = agent(client, "source_list").json()
+        assert after["mode"] == "monitor" and after["modes"] == ["hdmi", "monitor"] and not after["active"]
+        change(client, monitor, False)
+        after = agent(client, "source_list").json()
+        assert after["mode"] == "hdmi" and after["modes"] == ["hdmi"] and not after["active"]
+        assert after["monitors"] == [] and after["local_features"] == initial["local_features"]
+        stored = Settings(config.settings_path).get()
+        assert not stored["monitor_capture"] and not stored["overlay_mode"]
 
 
 def test_default_hdmi_profile_is_addressable_without_starting_a_helper(tmp_path, monkeypatch):

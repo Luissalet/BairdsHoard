@@ -1,12 +1,12 @@
 # Capture source bar
 
-The source bar offers **Capture card**, **Other display** and **Overlay**. The card keeps its existing capture settings. In the Windows desktop profile, choose a display and open **Confirm in settings**, then turn on capture and approve the displayed shortcut. The same switch stops capture. Changing mode or display leaves capture off. Activation lives in the running Baird instance and is reset on restart. Baird shows text while viewing, recording or blocked by privacy. The source controls follow the browser's language or the workspace's explicit language.
+The source bar starts with **Capture card**. In local Settings, enable **Displays on this PC** to add **Other display** and **Physical overlay** to add **Overlay**. Confirm each switch with its Windows shortcut. To capture, choose a display, open **Confirm in settings**, and confirm the separate capture switch. The same switch stops capture. Feature choices are stored in the profile. Capture authorization is reset when the mode, display or running instance changes. Baird shows text while viewing, recording or blocked by privacy. The source controls follow the browser's language or the workspace's explicit language.
 
 The app checks the family's screen privacy settings before opening a local producer and rechecks during capture. Private mode, an excluded application on the selected display, an unconfirmed policy or a missing display stops local capture. Baird drops the incoming bytes before they reach the capture buffer and clears the live view. If recording, it keeps the portion already captured. If the authority initially cannot confirm permission and subsequently reports private mode or an exclusion for that display, the indicator updates to the confirmed reason. Confirm capture again after resolving the interruption.
 
 ## Agent tools
 
-- **source_list** reports the selected mode, screen activation and available display identities.
+- **source_list** reports the selected mode, screen activation, feature states and available display identities.
 - **source_select** chooses a mode and an optional display from **source_list**. It gives back an undo token when the selection changes.
 - **source_undo** restores that previous selection while the token is current. A restored local source starts off.
 
@@ -22,7 +22,7 @@ Use the same producer for Other display and Overlay. The overlay integration con
 
 ## Castellano
 
-La barra ofrece **Capturadora**, **Otra pantalla** y **Overlay**. La capturadora conserva sus ajustes. En el perfil de escritorio de Windows, elige la pantalla, pulsa **Confirmar en ajustes**, activa la captura y confirma con el atajo indicado. El mismo interruptor detiene la captura. Cambiar de modo o pantalla deja la captura apagada. La barra indica si Baird está mirando, grabando o si la privacidad ha detenido la captura.
+La barra empieza con **Capturadora**. En Ajustes desde este PC, activa **Pantallas de este PC** para añadir **Otra pantalla** y **Overlay físico** para añadir **Overlay**. Confirma cada interruptor con su atajo de Windows. Para capturar, elige una pantalla, pulsa **Confirmar en ajustes** y confirma el interruptor de captura. El mismo interruptor detiene la captura. Los ajustes de las funciones se guardan en el perfil. El permiso de captura termina al cambiar de modo o pantalla y al cerrar Baird.
 
 Si se activa el modo privado, aparece una aplicación excluida, la pantalla cambia o Baird no puede comprobar la política, el visor local se apaga y se vacía la imagen en memoria, aunque la fuente haya dejado de enviar datos. Las capturas y los clips se preparan fuera del listado y de las descargas. Baird publica el archivo completo después de la última comprobación de privacidad y descarta los guardados en curso cuando se corta la fuente. Una grabación conserva el tramo anterior al corte. Baird consulta la política vigente antes de cada lectura del transporte y antes de entregar los datos a cada consumidor. Un aviso del Hub bloquea la fuente, detiene el productor y vacía el búfer de inmediato. Las lecturas y las entregas a consumidores comparten el bloqueo de la sesión. Baird espera a que terminen las lecturas y entregas autorizadas antes de confirmar el corte. Si la política se desconoce, la fuente queda apagada. Después de resolver la causa, vuelve a confirmar la captura.
 

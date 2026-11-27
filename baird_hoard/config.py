@@ -55,6 +55,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "audio_input": "hdmi",       # hdmi (the sound that comes with the picture) or line (the 3.5 mm input)
     "capture_always_on": False,  # opt in to capture even without viewers, recordings or rules
     "capture_enabled": True,     # off frees the device for other programs
+    "monitor_capture": False,   # show this PC's display sources after a local opt-in
+    "overlay_mode": False,       # allow the physical overlay source
     "monitor": None,             # stable monitor selection from /api/monitors
     "monitor_microphone": False, # separate microphone track, explicitly enabled
     "light_height": 720,         # "light copy" of a video: height in pixels
@@ -82,8 +84,8 @@ class Config:
     background: bool = True         # run OCR, watches, hotkeys and optional always-on capture
     isolated_instance: bool = False
     synthetic_capture: bool = False  # opt in to the marked, device-free test source
-    monitor_capture: bool = False    # use the explicitly selected desktop monitor
-    overlay_mode: bool = False      # fixed overlay profile until the source selector is integrated
+    monitor_capture: bool = False    # keep the desktop source enabled in a test profile
+    overlay_mode: bool = False        # select the overlay source in a monitor test profile
     monitor_policy_provider: str | None = None  # Trusted runtime adapter available inside the worker.
 
     @property
@@ -177,8 +179,8 @@ class Settings:
                 data[key] = (normalize_enhance(value, data[key]) if key == "enhance" else
                              normalize_copilot(value, data[key]) if key == "copilot" else value)
             data = normalize(data)
-            self._data = data
             write_json_atomic(self.path, data)
+            self._data = data
         return self.get()
 
 
@@ -194,6 +196,8 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     if data["audio_input"] not in AUDIO_INPUTS and not (data["audio_input"].isdigit() and len(data["audio_input"]) == 1):
         raise ValueError("audio_input must be hdmi, line, spdif or a crossbar input number")
     data["capture_enabled"] = bool(data["capture_enabled"])
+    data["monitor_capture"] = data["monitor_capture"] is True
+    data["overlay_mode"] = data["overlay_mode"] is True
     data["monitor"] = normalize_selection(data["monitor"])
     data["monitor_microphone"] = data["monitor_microphone"] is True
     data["capture_always_on"] = data["capture_always_on"] is True

@@ -647,8 +647,11 @@ async function toggleRecordingPause() {
   }
 }
 
+const captureLanguage = new URLSearchParams(location.search).get('lang') || navigator.language;
+const captureEnglish = /^en(?:-|$)/i.test(captureLanguage);
+
 function captureText(es, en) {
-  return document.documentElement.lang.startsWith('en') ? en : es;
+  return captureEnglish ? en : es;
 }
 
 // Audio meter. The element plays unmuted into a Web Audio graph (source -> analyser -> gain -> speakers) so the
@@ -805,47 +808,72 @@ $('tabs').addEventListener('click', (e) => {
 // ---------------------------------------------------------------- settings
 
 let settingsLocalCapture = false;
-let settingsCaptureControl = null;
 let settingsCapturePending = null;
-const settingsCaptureSwitch = $('settings-form').capture_enabled;
+const captureControlPath = '/api/settings/capture-control';
+const settingsControls = {
+  capture: { input: $('settings-form').capture_enabled, label: $('capture-enabled-label') },
+  monitor_capture: { input: $('settings-form').monitor_capture, label: $('monitor-capture-label'),
+    title: ['Pantallas de este PC', 'Displays on this PC'] },
+  overlay_mode: { input: $('settings-form').overlay_mode, label: $('overlay-mode-label'),
+    title: ['Overlay físico', 'Physical overlay'] },
+};
 
-function showCaptureControl(control) {
-  settingsCaptureControl = control;
-  settingsCaptureSwitch.disabled = !control?.ticket;
-  if (control) settingsCaptureSwitch.checked = control.active;
+function controlUrl(target, suffix = '') {
+  return `${captureControlPath}${suffix}?target=${target}`;
+}
+
+function showCaptureControl(target, control) {
+  const field = settingsControls[target];
+  field.control = control;
+  field.input.disabled = !control?.ticket;
+  if (control) field.input.checked = control.active;
   const display = control?.display;
-  const label = $('capture-enabled-label');
-  if (display) {
+  if (field.title) {
+    field.label.textContent = captureText(...field.title);
+  } else if (display) {
     const name = `${display.name} (${display.width}×${display.height}, ${display.x}, ${display.y})`;
-    label.textContent = captureText(`Capturar ${name}`, `Capture ${name}`);
+    field.label.textContent = captureText(`Capturar ${name}`, `Capture ${name}`);
   } else {
-    label.textContent = control
+    field.label.textContent = control
       ? captureText('Elige un monitor para activar la captura.', 'Choose a monitor to turn on capture.')
       : captureText('Activa la captura en Baird desde este PC.', 'Turn on capture in Baird on this PC.');
   }
 }
 
-async function loadCaptureControl() {
-  try { showCaptureControl(await api('/api/settings/capture-control', { method: 'POST', body: {} })); }
-  catch { showCaptureControl(null); }
+async function loadSettingsControls(status) {
+  const wasLocal = settingsLocalCapture;
+  settingsLocalCapture = status.source.mode !== 'hdmi';
+  for (const [target, field] of Object.entries(settingsControls)) {
+    field.label.lang = captureEnglish ? 'en' : 'es-ES';
+    if (target === 'capture' && !settingsLocalCapture) {
+      if (wasLocal) field.input.checked = status.source.active;
+      field.input.disabled = false;
+      field.control = null;
+      field.label.textContent = captureText('Capturadora activada', 'Capture card enabled');
+      continue;
+    }
+    if (field.title) field.input.checked = Boolean(status.source.local_features?.[target]);
+    field.input.disabled = true;
+    try { showCaptureControl(target, await api(controlUrl(target), { method: 'POST', body: {} })); }
+    catch { showCaptureControl(target, null); }
+  }
 }
 
 function cancelCaptureConfirmation() {
   const pending = settingsCapturePending;
   if (pending) {
     settingsCapturePending = null;
-    api('/api/settings/capture-control', { method: 'DELETE', body: pending, keepalive: true }).catch(() => {});
+    api(controlUrl(pending.target), { method: 'DELETE', body: { ticket: pending.ticket }, keepalive: true }).catch(() => {});
   }
 }
 
-async function showCaptureShortcut(operation, display) {
-  const label = $('capture-enabled-label');
+async function showCaptureShortcut(operation, label, title) {
   while (settingsCapturePending === operation && $('settings').open) {
-    const { key } = await api('/api/settings/capture-control/confirmation', { method: 'POST', body: operation });
+    const { key } = await api(controlUrl(operation.target, '/confirmation'), { method: 'POST', body: { ticket: operation.ticket } });
     if (key && settingsCapturePending === operation) {
       label.textContent = captureText(
-        `${display} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
-        `${display} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
+        `${title} · Pulsa Ctrl + Alt + Mayús + F${key} para confirmar.`,
+        `${title} · Press Ctrl + Alt + Shift + F${key} to confirm.`,
       );
       return;
     }
@@ -853,43 +881,38 @@ async function showCaptureShortcut(operation, display) {
   }
 }
 
-settingsCaptureSwitch.addEventListener('click', async (event) => {
-  if (!settingsLocalCapture) return;
-  if (!event.isTrusted || !navigator.userActivation?.isActive || !settingsCaptureControl?.ticket) {
-    event.preventDefault();
-    return;
-  }
-  const { ticket, active } = settingsCaptureControl;
-  const enabled = settingsCaptureSwitch.checked;
-  const operation = { ticket };
-  settingsCapturePending = operation;
-  settingsCaptureControl = null;
-  settingsCaptureSwitch.disabled = true;
-  const submission = api('/api/settings/capture-control', { method: 'PUT', body: { ticket, enabled } });
-  if (enabled) {
-    settingsCaptureSwitch.checked = active;
-    const label = $('capture-enabled-label');
-    const display = label.textContent;
-    label.setAttribute('aria-live', 'polite');
-    label.textContent = captureText(`${display} · Preparando la confirmación…`, `${display} · Preparing confirmation…`);
-    showCaptureShortcut(operation, display).catch(() => {});
-  }
-  try {
-    const control = await submission;
-    if (settingsCapturePending === operation) {
-      showCaptureControl(control);
-      refreshStatus();
+for (const [target, field] of Object.entries(settingsControls)) {
+  field.input.addEventListener('click', async (event) => {
+    if (target === 'capture' && !settingsLocalCapture) return;
+    if (!event.isTrusted || !navigator.userActivation?.isActive || !field.control?.ticket || settingsCapturePending) {
+      event.preventDefault();
+      return;
     }
-  } catch (err) {
-    if (settingsCapturePending === operation) {
-      settingsCaptureSwitch.checked = active;
-      fail(err);
-      await loadCaptureControl();
+    const { ticket, active } = field.control;
+    const enabled = field.input.checked;
+    const operation = { target, ticket };
+    settingsCapturePending = operation;
+    field.input.checked = active;
+    field.input.disabled = true;
+    const submission = api(controlUrl(target), { method: 'PUT', body: { ticket, enabled } });
+    if (enabled) {
+      const title = field.label.textContent;
+      field.label.setAttribute('aria-live', 'polite');
+      field.label.textContent = captureText(`${title} · Preparando la confirmación…`, `${title} · Preparing confirmation…`);
+      showCaptureShortcut(operation, field.label, title).catch(() => {});
     }
-  } finally {
-    if (settingsCapturePending === operation) settingsCapturePending = null;
-  }
-});
+    try { await submission; }
+    catch (err) { if (settingsCapturePending === operation) fail(err); }
+    finally {
+      if (settingsCapturePending === operation) {
+        try { await loadSettingsControls(await api('/api/status')); }
+        catch (err) { fail(err); }
+        finally { if (settingsCapturePending === operation) settingsCapturePending = null; }
+        refreshStatus();
+      }
+    }
+  });
+}
 
 async function openSettings() {
   const form = $('settings-form');
@@ -898,12 +921,7 @@ async function openSettings() {
     state.settings = s;
     showDevices([], s.device);
     form.capture_enabled.checked = s.capture_enabled;
-    settingsLocalCapture = status.source.mode !== 'hdmi';
-    if (settingsLocalCapture) await loadCaptureControl();
-    else {
-      settingsCaptureSwitch.disabled = false;
-      $('capture-enabled-label').textContent = captureText('Capturadora activada', 'Capture card enabled');
-    }
+    await loadSettingsControls(status);
     form.capture_always_on.checked = s.capture_always_on;
     for (const k of ['audio_input', 'snapshot_format', 'clip_seconds', 'buffer_seconds', 'light_height', 'light_kbps']) {
       const el = form[k];

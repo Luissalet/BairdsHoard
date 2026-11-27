@@ -15,7 +15,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from ..agent_sources import CONTROL_LIFETIME, activation_required
+from ..agent_sources import CONTROL_LIFETIME, ControlTarget, ProfileSources, activation_required
 from ..agent_tools import TOOLS_BY_NAME
 from ..document_review import original_view
 from ..errors import BairdError
@@ -265,16 +265,15 @@ def settings_get(request: Request):
 @router.put("/api/settings")
 def settings_put(request: Request, body: dict[str, Any]):
     svc = services(request)
-    if svc.monitor_source is not None and {"capture_enabled", "monitor", "monitor_microphone"} & body.keys():
-        with svc.sources.lock:
+    with svc.sources.lock:
+        if svc.monitor_source is not None and {"capture_enabled", "monitor", "monitor_microphone"} & body.keys():
             if svc.sources.status()["mode"] == "hdmi" and not {"monitor", "monitor_microphone"} & body.keys():
                 return svc.apply_settings(body)
             if "capture_enabled" in body or not _local_settings_client(request):
                 raise activation_required()
             if "monitor" in body and (body["monitor"] != svc.settings["monitor"] or svc.sources.status()["blocked"]):
                 body = {**body, "capture_enabled": False}
-            return svc.apply_settings(body)
-    return svc.apply_settings(body)
+        return svc.apply_settings(body)
 
 
 def _local_settings_client(request: Request) -> bool:
@@ -283,22 +282,24 @@ def _local_settings_client(request: Request) -> bool:
             and request.url.hostname in ("localhost", "127.0.0.1", "::1"))
 
 
-def _require_capture_control(request: Request) -> None:
-    if (services(request).monitor_source is None or not _local_settings_client(request)
+def _require_capture_control(request: Request, target: ControlTarget) -> None:
+    svc = services(request)
+    if (not isinstance(svc.sources, ProfileSources) or (target == "capture" and svc.monitor_source is None)
+            or not _local_settings_client(request)
             or request.headers.get("sec-fetch-site") != "same-origin"
             or request.headers.get("origin") != str(request.base_url).rstrip("/")):
         raise activation_required()
 
 
 @router.post(CONTROL_PATH)
-def capture_control(request: Request):
-    _require_capture_control(request)
+def capture_control(request: Request, target: ControlTarget = "capture"):
+    _require_capture_control(request, target)
     session = request.cookies.get(CONTROL_COOKIE) or token_urlsafe(32)
-    return _capture_control_response(request, session)
+    return _capture_control_response(request, session, target)
 
 
-def _capture_control_response(request: Request, session: str):
-    control = services(request).sources.capture_control(session)
+def _capture_control_response(request: Request, session: str, target: ControlTarget):
+    control = services(request).sources.capture_control(session, target)
     response = JSONResponse(control, headers={"Cache-Control": "no-store"})
     response.set_cookie(CONTROL_COOKIE, session, max_age=CONTROL_LIFETIME, path=CONTROL_PATH,
                         httponly=True, samesite="strict", secure=request.url.scheme == "https")
@@ -315,26 +316,26 @@ class CaptureControlBody(CaptureTicketBody):
 
 
 @router.put(CONTROL_PATH)
-def set_capture_control(request: Request, body: CaptureControlBody):
-    _require_capture_control(request)
+def set_capture_control(request: Request, body: CaptureControlBody, target: ControlTarget = "capture"):
+    _require_capture_control(request, target)
     svc = services(request)
     session = request.cookies.get(CONTROL_COOKIE)
     if not session:
         raise activation_required()
-    svc.sources.set_capture(session=session, ticket=body.ticket, enabled=body.enabled)
-    return _capture_control_response(request, session)
+    svc.sources.set_capture(session=session, ticket=body.ticket, enabled=body.enabled, target=target)
+    return _capture_control_response(request, session, target)
 
 
 @router.delete(CONTROL_PATH, status_code=204)
-def cancel_capture_control(request: Request, body: CaptureTicketBody):
-    _require_capture_control(request)
+def cancel_capture_control(request: Request, body: CaptureTicketBody, target: ControlTarget = "capture"):
+    _require_capture_control(request, target)
     if session := request.cookies.get(CONTROL_COOKIE):
         services(request).sources.cancel_capture_control(session=session, ticket=body.ticket)
 
 
 @router.post(CONTROL_PATH + "/confirmation")
-def capture_confirmation(request: Request, body: CaptureTicketBody):
-    _require_capture_control(request)
+def capture_confirmation(request: Request, body: CaptureTicketBody, target: ControlTarget = "capture"):
+    _require_capture_control(request, target)
     session = request.cookies.get(CONTROL_COOKIE)
     if not session:
         raise activation_required()
@@ -356,8 +357,10 @@ def devices(request: Request):
 
 @router.get("/api/monitors")
 def monitors(request: Request):
-    source = services(request).monitor_source
-    return {"enabled": source is not None, "monitors": source.list_monitors() if source else []}
+    svc = services(request)
+    with svc.sources.lock:
+        source = svc.monitor_source
+        return {"enabled": source is not None, "monitors": source.list_monitors() if source else []}
 
 
 @router.get("/api/ui/tools")

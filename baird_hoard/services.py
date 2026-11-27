@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from . import __version__
-from .agent_sources import ProfileSources, capture_publication
+from .agent_sources import LOCAL_FEATURES, ProfileSources, activation_required, capture_publication
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .capture_approval import ConfirmCapture, confirm_with_windows
 from .capture_source import SyntheticSource
@@ -54,17 +54,16 @@ class Services:
         self.ffprobe = ffprobe_path(self.ffmpeg)
         self.buffer = TsBuffer(keep_seconds=self.settings["buffer_seconds"])
         self._last_state = "off"
-        self.monitor_source = None
-        if config.monitor_capture and not config.synthetic_capture:
-            self.monitor_source = monitor_source or MonitorSource(
-                self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
-            )
-            if self.settings["capture_enabled"]:
-                self.settings.update({"capture_enabled": False})
+        monitor = monitor_source or MonitorSource(self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider)
+        monitor_enabled = not config.synthetic_capture and (config.monitor_capture or self.settings["monitor_capture"])
+        self.monitor_source = monitor if monitor_enabled else None
+        if monitor_enabled and self.settings["capture_enabled"]:
+            self.settings.update({"capture_enabled": False})
         # An injected producer without an authority can still exercise the fixed profile contract.
-        native_selector = self.monitor_source is not None and (
-            monitor_source is None or self.monitor_source.policy_provider is not None or read_screen_policy is not None)
-        fixed_monitor = self.monitor_source is not None and not native_selector
+        native_selector = not config.synthetic_capture and (
+            monitor_source is None or monitor.policy_provider is not None or read_screen_policy is not None
+        ) and (monitor_enabled or screen_backend is None)
+        fixed_monitor = monitor_enabled and not native_selector
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source if fixed_monitor else None
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=fixed_monitor,
@@ -79,18 +78,27 @@ class Services:
         def recording_state():
             return self.library.recorder.status()["state"]
 
+        self._make_monitor_selector = None
         if native_selector:
-            monitor = self.monitor_source
-            screen_backend = screen_backend or self._monitor_backend(monitor, read_screen_policy)
-            saved = self.settings["monitor"] or {}
-            initial = Selection("overlay" if config.overlay_mode else "monitor", saved.get("id"), saved.get("layout"))
+            profile = ProfileSources(self, confirm_capture)
+            self.sources = profile
+
             def prepare_change(choice: Selection) -> None:
                 binding = {"id": choice.monitor, "layout": choice.layout} if choice.monitor else None
                 self.settings.update({"monitor": binding, "capture_enabled": False})
 
-            selector = SourceControls(self.engine, recording_state, screen_backend, read_screen_policy,
-                                      subscribe_screen_policy, initial=initial, prepare_change=prepare_change)
-            self.sources = ProfileSources(self, confirm_capture, selector=selector)
+            def make_selector(initial: Selection) -> SourceControls:
+                backend = screen_backend or self._monitor_backend(monitor, read_screen_policy)
+                return SourceControls(self.engine, recording_state, backend, read_screen_policy, subscribe_screen_policy,
+                                      initial=initial, prepare_change=prepare_change,
+                                      overlay_enabled=self._overlay_available, lock=profile.lock)
+
+            self._make_monitor_selector = make_selector
+            if monitor_enabled:
+                saved = self.settings["monitor"] or {}
+                overlay = config.overlay_mode or self.settings["overlay_mode"]
+                profile.selector = make_selector(Selection("overlay" if overlay else "monitor",
+                                                           saved.get("id"), saved.get("layout")))
         elif screen_backend is not None:
             self.sources = SourceControls(self.engine, recording_state, screen_backend, read_screen_policy,
                                           subscribe_screen_policy)
@@ -116,7 +124,47 @@ class Services:
         )
         self.library.capture_publication = lambda *, finalizes_call=False: capture_publication(self, finalizes_call=finalizes_call)
         self.copilot.capture_publication = lambda: capture_publication(self)
+        self._monitor = monitor
         self.started = time.time()
+
+    def _overlay_available(self) -> bool:
+        # The environment monitor profile retains its original three source modes.
+        legacy_overlay = self.config.monitor_capture and self._make_monitor_selector is not None
+        return self.monitor_source is not None and (legacy_overlay or self.config.overlay_mode or self.settings["overlay_mode"])
+
+    def local_features(self) -> dict[str, bool]:
+        return {"monitor_capture": self.monitor_source is not None, "overlay_mode": self._overlay_available()}
+
+    def local_feature_editable(self, feature: str) -> bool:
+        if self._make_monitor_selector is None or self.config.monitor_capture:
+            return False
+        return (feature == "monitor_capture" or
+                (feature == "overlay_mode" and self.monitor_source is not None and not self.config.overlay_mode))
+
+    def set_local_feature(self, feature: str, enabled: bool) -> None:
+        """Apply a change already authorized by the local settings control."""
+        profile = self.sources
+        with profile.lock:
+            if not self.local_feature_editable(feature):
+                raise activation_required()
+            if feature == "monitor_capture":
+                if enabled:
+                    selector = self._make_monitor_selector(Selection())
+                    self.settings.update({feature: True})
+                    self.monitor_source = self._monitor
+                    profile.selector = selector
+                else:
+                    if profile.selector.selection.mode != "hdmi":
+                        profile.select("hdmi")
+                    self.settings.update({feature: False, "overlay_mode": False})
+                    profile.selector.close()
+                    profile.selector = None
+                    self.monitor_source = None
+            else:
+                if not enabled and profile.selector.selection.mode == "overlay":
+                    profile.select("monitor")
+                self.settings.update({feature: enabled})
+            profile.advance_revision()
 
     @staticmethod
     def _monitor_backend(monitor: MonitorSource, read_override) -> ScreenBackend:
@@ -241,6 +289,8 @@ class Services:
                 "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
+        if LOCAL_FEATURES & changes.keys():
+            raise activation_required()
         with self.sources.lock:
             return self._apply_settings(changes)
 
