@@ -95,6 +95,7 @@ class AcquisitionGate:
             if confirmed is not True:
                 # The cached revision was displaced. The old grant is unusable even
                 # inside its TTL, and this producer cannot restart on its own.
+                held.close()
                 self._expires = float("-inf")
                 try:
                     current = policy.read(*self._selection)

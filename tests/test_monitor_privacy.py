@@ -27,7 +27,7 @@ from .test_monitor_source import MONITOR, choose
 
 class HubDouble:
     def __init__(self):
-        self.lock = threading.RLock()
+        self.lock = threading.Lock()
         self.state = PolicySnapshot(1, False, False, False)
         self.reads = 0
         self.online = True
