@@ -9,6 +9,7 @@ from typing import Any
 
 from . import __version__
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
+from .capture_source import SyntheticSource
 from .config import Config, Settings
 from .copilot import Copilot
 from .enhance import EnhanceStage, Enhancer, StageSource
@@ -39,8 +40,9 @@ class Services:
         self.ffprobe = ffprobe_path(self.ffmpeg)
         self.buffer = TsBuffer(keep_seconds=self.settings["buffer_seconds"])
         self._last_state = "off"
+        source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else None
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
-                                    fake_source=config.fake_source)
+                                    fake_source=config.fake_source, source=source)
         self.live = LiveRemux(self.engine, self.ffmpeg)
         self.enhancer = Enhancer(self.ffmpeg, self.ffprobe, config.work_dir)
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
@@ -131,7 +133,7 @@ class Services:
         before = self.settings.get()
         after = self.settings.update(changes)
         self.buffer.keep_seconds = after["buffer_seconds"]
-        reopen = any(before[k] != after[k] for k in ("device", "audio_input"))
+        reopen = not self.config.synthetic_capture and any(before[k] != after[k] for k in ("device", "audio_input"))
         if reopen or any(before[k] != after[k] for k in ("capture_enabled", "capture_always_on")):
             self.engine.settings_changed(reopen=reopen)
         if before["enhance"] != after["enhance"]:

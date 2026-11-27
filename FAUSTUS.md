@@ -88,7 +88,7 @@ content). Connector preset: its own `faustus-plugin.json` (adopted from Faustus 
 - Files: `Videos\Baird` (setting `media_dir`). Data: `data/` (settings, media index, thumbnails, logs, `mcp-token`).
 - Native helper: `native/bairdcap.cs` → `bairdcap.exe` (built on first start with the Windows C# compiler). Screen text for the
   copilot: `native/bairdocr.ps1` (Windows PowerShell 5.1 and `Windows.Media.Ocr`; started on first use, stopped when idle).
-- Hardware notes: `docs/DEVICE.md`.
+- Hardware notes: `docs/DEVICE.md`. The source contract and the opt-in marked test feed are in `docs/CAPTURE_SOURCES.md`.
 
 ## Skills for the agents that connect
 

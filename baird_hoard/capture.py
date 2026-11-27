@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .capture_source import CaptureSource, SyntheticSource
 from .config import Settings
 from .errors import BairdError
 from .native import NATIVE_DIR, NO_WINDOW, STUCK_HINT, bind_to_app, ensure_helper, helper_pids
@@ -35,16 +36,30 @@ IDLE_GRACE_S = 10.0
 RETRY_DELAYS_S = (15.0, 60.0, 300.0, 900.0)
 OPEN_LIMIT = 12
 OPEN_WINDOW_S = 3600.0
+SOURCE_STUCK_MESSAGE = "The capture source did not stop."
+
+
+class _HdmiSource:
+    def command(self, settings: Settings) -> list[str]:
+        cfg = settings.get()
+        exe = ensure_helper()
+        return [str(exe), "--device", cfg["device"], "--audio", cfg["audio_input"], "--out", "-"]
+
+    def initial_state(self) -> dict[str, Any]:
+        return {}  # Metadata arrives in the helper's ready event.
 
 
 class CaptureEngine:
     def __init__(self, settings: Settings, buffer: TsBuffer, *, ffmpeg: Optional[str] = None, fake: bool = False,
-                 on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = ""):
+                 on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = "",
+                 source: CaptureSource | None = None):
         self.settings = settings
         self.buffer = buffer
-        self.ffmpeg = ffmpeg
-        self.fake = fake
-        self.fake_source = fake_source
+        self._alternate_source = source is not None
+        self._uses_hdmi_helper = source is None and not fake
+        self._source: CaptureSource = source if source is not None else (
+            SyntheticSource(ffmpeg, video=fake_source, marked=False) if fake else _HdmiSource()
+        )
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
@@ -65,6 +80,7 @@ class CaptureEngine:
         self._fatal: Optional[tuple[str, str, float]] = None  # code, message, time of the helper's last error
         self._fails = 0
         self._stuck_pids: set[int] = set()
+        self._stuck_source: Optional[subprocess.Popen] = None
         self.state: dict[str, Any] = {"state": "idle", "message": "", "device": "", "encoder": "", "input": None,
                                       "kbps": 0, "since": None, "restarts": 0, "audio": False, "hint": ""}
 
@@ -193,7 +209,7 @@ class CaptureEngine:
         proc = self._proc
         if proc is None or proc.poll() is not None:
             return
-        if self.fake:
+        if not self._uses_hdmi_helper:
             proc.terminate()
             return
         try:
@@ -208,22 +224,7 @@ class CaptureEngine:
             proc.kill()  # the run loop decides whether it actually went away
 
     def _command(self) -> list[str]:
-        cfg = self.settings.get()
-        if self.fake:
-            if not self.ffmpeg:
-                raise BairdError("unavailable", "ffmpeg is needed for the demo source.")
-            if self.fake_source:
-                return [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-re", "-stream_loop", "-1", "-i", self.fake_source,
-                        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-map", "0:v:0", "-map", "1:a:0",
-                        "-vf", "scale=1280:720,fps=30", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "30",
-                        "-b:v", "6M", "-maxrate", "7M", "-bufsize", "3M", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-muxdelay", "0", "-muxpreload", "0", "-f", "mpegts", "pipe:1"]
-            return [self.ffmpeg, "-hide_banner", "-loglevel", "error", "-re",
-                    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30",
-                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
-                    "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "30", "-pix_fmt", "yuv420p",
-                    "-c:a", "aac", "-b:a", "96k", "-f", "mpegts", "pipe:1"]
-        exe = ensure_helper()
-        return [str(exe), "--device", cfg["device"], "--audio", cfg["audio_input"], "--out", "-"]
+        return self._source.command(self.settings)
 
     def _go_stuck(self, why: str) -> None:
         if self.state.get("state") != "stuck":
@@ -266,9 +267,13 @@ class CaptureEngine:
                 self._opening = True
             attempted = True
             try:
-                if self._stuck_pids and not self.fake:
+                if self._stuck_source is not None and self._stuck_source.poll() is not None:
+                    self._stuck_source = None
+                if self._stuck_pids and self._uses_hdmi_helper:
                     self._stuck_pids &= helper_pids()
-                if self._stuck_pids:
+                if self._stuck_source is not None:
+                    self._set(state="error", message=SOURCE_STUCK_MESSAGE, kbps=0, since=None)
+                elif self._stuck_pids:
                     self._go_stuck("previous helper is still running")
                 else:
                     attempted = self._run_once()
@@ -290,11 +295,12 @@ class CaptureEngine:
             if not self._wanted() or self._stop.is_set():
                 return False
         cmd = self._command()
+        source_state = self._source.initial_state()
         with self._lock:
             if not self._wanted() or self._stop.is_set() or self._restart.is_set():
                 return False
             manual, self._manual_open = self._manual_open, False
-            limit = self._reserve_opening(manual=manual)
+            limit = 0.0 if self._alternate_source else self._reserve_opening(manual=manual)
             if limit:
                 self._limit_until = time.monotonic() + limit
             else:
@@ -306,12 +312,13 @@ class CaptureEngine:
         if limit:
             self._set(state="rate_limited", message="Hourly capture opening limit reached.", hint="", kbps=0, since=None)
             return True
-        self._set(state="starting", message="Opening the capture device…", hint="", input=None, kbps=0, since=None)
+        message = "Opening the capture source…" if self._alternate_source else "Opening the capture device…"
+        self._set(state="starting", message=message, hint="", input=None, kbps=0, since=None)
         bind_to_app(proc)
         err_thread = threading.Thread(target=self._read_events, args=(proc,), name="baird-capture-events", daemon=True)
         err_thread.start()
-        if self.fake:
-            self._set(device="demo", encoder="ffmpeg", input={"width": 1280, "height": 720}, audio=True)
+        if source_state:
+            self._set(**source_state)
         box = {"got_data": False}
         pump = threading.Thread(target=self._pump, args=(proc, box), name="baird-capture-pump", daemon=True)
         pump.start()
@@ -351,8 +358,13 @@ class CaptureEngine:
         except subprocess.TimeoutExpired:
             code = None
         if code is None:
-            # Still there after a kill: it is stuck inside the driver and holds the device. Leave its threads behind.
             self._proc = None
+            if self._alternate_source:
+                self._stuck_source = proc
+                if not self._stop.is_set():
+                    self._set(state="error", message=SOURCE_STUCK_MESSAGE, input=None, kbps=0, since=None)
+                return True
+            # The helper is stuck inside the driver and holds the device. Leave its threads behind.
             self._stuck_pids.add(proc.pid)
             self._fails += 1
             if not self._stop.is_set():
@@ -367,6 +379,9 @@ class CaptureEngine:
         got_data = box["got_data"]
         with self._lock:
             self.state["restarts"] = int(self.state.get("restarts", 0)) + 1
+        if self._alternate_source:
+            self._set(state="error", message=f"The capture source stopped (code {code}).", kbps=0, since=None)
+            return True
         log.info("capture helper exited with %s", code)
         fatal = self._fatal
         if got_data:
@@ -387,7 +402,7 @@ class CaptureEngine:
         return True
 
     def _pump(self, proc: subprocess.Popen, box: dict[str, bool]) -> None:
-        """Read the helper's stdout until it closes, feeding the buffer and the listeners."""
+        """Read the source's stdout until it closes, feeding the buffer and the listeners."""
         out = proc.stdout
         if out is None:
             return
@@ -453,7 +468,7 @@ class CaptureEngine:
     def send(self, command: str) -> bool:
         """Send a line to the helper (``iframe``); False when it is not running."""
         proc = self._proc
-        if proc is None or proc.poll() is not None or proc.stdin is None or self.fake:
+        if proc is None or proc.poll() is not None or proc.stdin is None or not self._uses_hdmi_helper:
             return False
         try:
             proc.stdin.write((command.strip() + "\n").encode())
