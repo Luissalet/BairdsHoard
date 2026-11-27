@@ -63,6 +63,8 @@ La fuente de monitor de Windows es opcional. Captura la pantalla elegida con son
 
 Captura activada o no (desactivada libera la capturadora para otros programas), captura siempre activa opcional, dispositivo, entrada de audio (HDMI o línea), formato de captura, duración del clip, ventana de memoria (10–600 s), carpeta de medios, tamaño y bitrate de las copias ligeras, OCR automático, atajos globales y su combinación (con un modificador y distintas entre sí). El copilot tiene su bloque (`copilot`): si un asistente puede dibujar sobre el directo (el interruptor está en el botón Copilot), el tamaño de la imagen que recibe al mirar, los minutos tras los que se cierra una sesión que nadie toca y el idioma en que Windows lee la pantalla.
 
+El productor de monitor requiere un adaptador de privacidad antes de abrir la pantalla o el audio. [Contrato de privacidad](docs/CAPTURE_SOURCES.md)
+
 ## Conexión con Faustus y Hoard Hub
 
 El Hub arranca y para la app desde su ficha, y el manifiesto `faustus-plugin.json` la registra en Faustus. Las capturas y clips se pueden mandar a un chat nuevo de Faustus, y los avisos de vigilancia salen por el bus de la familia y por el Hub.

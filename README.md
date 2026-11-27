@@ -75,6 +75,8 @@ Capture on/off (off frees the device for other programs), optional always-on cap
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
 shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default). The optional Windows monitor source captures a selected display with system loopback and an optional microphone track. See [capture sources](docs/CAPTURE_SOURCES.md) for the process flag and selection API. The copilot has its own too (`copilot`): whether an assistant may draw over the live picture (the switch is in the Copilot button), the size of the picture it gets when it looks, the minutes after which a session nobody touches ends, and the language Windows reads the screen in.
 
+The optional monitor producer requires an authoritative screen privacy adapter before opening the inputs. [Monitor privacy contract](docs/CAPTURE_SOURCES.md)
+
 ## Connection with Faustus and Hoard Hub
 
 The Hub starts and stops the app from its tile and the plugin manifest `faustus-plugin.json` registers it in Faustus. Screenshots and clips can be sent to a new Faustus chat, and watch alerts go out on the family bus and through the Hub.
