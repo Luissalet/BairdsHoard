@@ -62,7 +62,10 @@ class LiveRemux:
         self._primed_at = 0
         self._fails = 0
         self._started_at = 0.0
-        engine.add_listener(self._on_data)
+        if isinstance(engine, CaptureEngine):
+            engine.add_listener(self._on_data, interested=lambda: self._proc is not None)
+        else:
+            engine.add_listener(self._on_data)
 
     # ------------------------------------------------------------------ viewers
 

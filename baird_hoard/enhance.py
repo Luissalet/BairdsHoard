@@ -553,7 +553,7 @@ class EnhanceStage(_Listenable):
         self.encoder = ""
         self.message = ""
         self.stats: dict[str, Any] = {"dropped": 0, "frames": 0, "fps": 0.0, "speed": 0.0, "restarts": 0}
-        engine.add_listener(self._on_raw)
+        engine.add_listener(self._on_raw, interested=lambda: self._proc is not None or self.enabled())
         threading.Thread(target=self._watchdog, name="baird-enhance-watch", daemon=True).start()
 
     # ------------------------------------------------------------------ state
