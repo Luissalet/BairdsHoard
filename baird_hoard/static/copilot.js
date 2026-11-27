@@ -513,7 +513,7 @@
     renderHud(session);
     renderTalk(session);
     const box = layout();                 // after the bar: showing it under the picture changes the picture's size
-    renderMarks(state?.overlay?.available && !state.overlay.error ? null : session, box);
+    renderMarks(state?.overlay?.visible && !state.overlay.hidden ? null : session, box);
     if (ui.panel) fillPanel();
   }
 
@@ -586,7 +586,7 @@
       now.append(demo);
     }
     panel.append(now);
-    if (state.overlay?.visible && !state.overlay.hidden) {
+    if (session?.status === 'active' && state.overlay?.visible && !state.overlay.hidden) {
       const capture = el('label');
       capture.lang = lang;
       capture.title = overlayText.includeHint;

@@ -4,6 +4,7 @@ import sys
 import time
 from ctypes import c_void_p
 from ctypes import wintypes
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -266,6 +267,59 @@ def test_hiding_reshowing_and_ending_the_overlay(synthetic_app, monkeypatch):
         client.post("/copilot/user", json={"action": "next"}).raise_for_status()
         wait_for(controller.status, lambda status: not status["visible"])
         assert buffer.frame is None and not controller.status()["available"]
+
+
+@pytest.mark.parametrize("coalesce", [False, True], ids=["presenter-sees-completion", "coalesced-completion"])
+def test_capture_opt_in_ends_with_the_guide_even_if_the_session_is_reused(synthetic_app, monkeypatch, coalesce):
+    client, svc, source = synthetic_app
+    controller = svc.copilot.overlay
+    buffer = MemoryOverlay()
+    freeze, paused, release = Event(), Event(), Event()
+
+    def pump():
+        if freeze.is_set() and not paused.is_set():
+            paused.set()
+            assert release.wait(5), "The test did not release the presenter"
+        return False
+
+    monkeypatch.setattr(buffer, "pump", pump)
+    monkeypatch.setattr(controller, "_presenter", lambda: buffer)
+    source.update(SOURCE)
+    agent(client, svc, "copilot_show", **GUIDE, wait_s=0)
+    wait_for(controller.status, lambda status: status["visible"])
+    client.post("/copilot/overlay", json={"action": "include"}).raise_for_status()
+    wait_for(lambda: not buffer.exclude_capture)
+    initial = client.get("/copilot/state").json()["session"]
+    next_step = {**STEP, "say": "Nueva guía después del último paso"}
+
+    with client.websocket_connect("ws://127.0.0.1:17643/copilot/ws") as socket:
+        assert socket.receive_json()["overlay"]["included"]
+        if coalesce:
+            freeze.set()
+        try:
+            if coalesce:
+                assert paused.wait(4)
+            done = client.post("/copilot/user", json={"action": "next"}).raise_for_status().json()
+            pushed = socket.receive_json()
+            assert done["session"]["status"] == pushed["session"]["status"] == "done"
+            if not coalesce:
+                wait_for(lambda: buffer.frame is None)
+            else:
+                assert buffer.frame.instruction == STEP["say"] and not buffer.exclude_capture
+                late_include = client.post("/copilot/overlay", json={"action": "include"}).raise_for_status().json()
+            agent(client, svc, "copilot_show", **{**GUIDE, "steps": [next_step]}, wait_s=0)
+            next_session = client.get("/copilot/state").json()["session"]
+        finally:
+            release.set()
+
+    assert next_session["status"] == "active" and next_session["id"] == initial["id"]
+    wait_for(lambda: buffer.frame and buffer.frame.instruction == next_step["say"])
+    assert buffer.exclude_capture
+    assert not controller.status()["included"]
+    assert not done.get("overlay", {}).get("included", False)
+    assert not pushed.get("overlay", {}).get("included", False)
+    if coalesce:
+        assert not late_include.get("overlay", {}).get("included", False)
 
 
 def test_disappears_when_source_is_lost_moved_or_closed(synthetic_app, monkeypatch):

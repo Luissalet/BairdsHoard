@@ -180,6 +180,10 @@ class CopilotOverlay:
         with self._lock:
             if (session or {}).get("id") != (self._session or {}).get("id"):
                 self._hidden = self._include = False
+            # A conversation can keep its ID across guides. Revoke capture inclusion
+            # at completion even if the presenter never draws the completed state.
+            if not self._active(session):
+                self._include = False
             if session != self._session:
                 self._session = session
                 self._wake.set()
@@ -213,7 +217,8 @@ class CopilotOverlay:
             if action == "hide":
                 self._include = False
             if action == "include":
-                self._include = self._status["visible"] and not self._hidden
+                self._include = (self._active(self._session) and self._running and
+                                 self._status["visible"] and not self._hidden)
             if action == "exclude":
                 self._include = False
             self._wake.set()
