@@ -111,6 +111,16 @@ class CaptureEngine:
             self._thread = threading.Thread(target=self._loop, name="baird-capture", daemon=True)
             self._thread.start()
 
+    def local_source(self) -> LocalSource | None:
+        with self._lock:
+            return self._local_source
+
+    def require_local_policy(self, local: LocalSource | None) -> None:
+        """Recheck a local picture's permission before using or publishing it."""
+        allowed = self.local_source() is None if local is None else self._check_local_policy(local, fresh=True)
+        if not allowed:
+            raise BairdError("no_signal", "The capture source is no longer available.", state="off")
+
     def source_enabled(self) -> bool:
         with self._lock:
             if self._local_source is not None:
@@ -213,8 +223,8 @@ class CaptureEngine:
         with self._changed:
             while self._wanted() and not self._stop.is_set():
                 try:
-                    self.require_picture()
-                    return
+                    self._require_picture_ready()
+                    break
                 except BairdError:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or (not self._opening and self.snapshot()["retry_in_s"] > 0):
@@ -223,6 +233,10 @@ class CaptureEngine:
         self.require_picture()
 
     def require_picture(self) -> None:
+        self.require_local_policy(self.local_source())
+        self._require_picture_ready()
+
+    def _require_picture_ready(self) -> None:
         st = self.snapshot()
         if st["state"] != "running" or st["age_s"] is None or st["age_s"] > 3:
             hint = {"off": "Turn capture on.", "no_device": "Plug in the capture device (AVerMedia GL310).",
@@ -338,8 +352,7 @@ class CaptureEngine:
         source = local.producer if local is not None else self._source
         if source is None:
             return False
-        if local is not None and local.check and local.check(True):
-            self._block_local_source(local)
+        if local is not None and not self._check_local_policy(local, fresh=True):
             return False
         cmd = self._command() if local is None else source.command(self.settings)
         source_state = source.initial_state()
@@ -383,9 +396,15 @@ class CaptureEngine:
                 with self._lock:
                     closing = (self._stop.is_set() or self._restart.is_set() or not self.source_enabled()
                                or (not self._wanted() and (local is not None or time.monotonic() >= self._idle_until)))
+                if not closing and local is not None:
+                    # The pipe reader can block indefinitely on a silent producer.
+                    closing = not self._check_local_policy(local, fresh=True)
                 if closing:
                     self._kill()
                     killed_at = now
+                    if local is not None:
+                        state = "idle" if self.source_enabled() else "off"
+                        self._set(state=state, message="", input=None, kbps=0, since=None, audio=False)
             if not pump.is_alive():
                 break
             if killed_at is None:
@@ -450,14 +469,21 @@ class CaptureEngine:
                 self._set(state="error", message=f"The capture helper stopped (code {code}).", kbps=0, since=None)
         return True
 
-    def _block_local_source(self, local: LocalSource) -> None:
-        with self._lock:
-            if self._local_source is not local:
-                return
-            self._local_source = LocalSource()
-            self._restart.set()
-            self.buffer.reset()
-        self._set(state="off", message="Screen capture is off.", device="", input=None, kbps=0, since=None, audio=False)
+    def _check_local_policy(self, local: LocalSource, *, fresh: bool) -> bool:
+        if local.check is None:
+            return False
+        if local.check(fresh):
+            with self._changed:
+                if self._local_source is local:
+                    self._local_source = LocalSource()
+                    self.buffer.reset()
+                    self.state.update(state="off", message="Screen capture is off.", device="", input=None,
+                                      kbps=0, since=None, audio=False)
+                    self._restart.set()
+                    self._wake.set()
+                    self._changed.notify_all()
+            return False
+        return self.local_source() is local
 
     def _pump(self, proc: subprocess.Popen, box: dict[str, bool], local: LocalSource | None = None) -> None:
         """Read the source's stdout until it closes, feeding the buffer and the listeners."""
@@ -470,8 +496,7 @@ class CaptureEngine:
                 chunk = out.read1(65536) if hasattr(out, "read1") else out.read(65536)  # type: ignore[union-attr]
                 if not chunk:
                     break
-                if local and local.check and local.check(False):
-                    self._block_local_source(local)
+                if local is not None and not self._check_local_policy(local, fresh=False):
                     break
                 with self._lock:
                     if self._proc is not proc or local is not self._local_source:

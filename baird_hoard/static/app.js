@@ -107,7 +107,11 @@ class LivePlayer {
       if (typeof ev.data === 'string') {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'init') this.setup(msg.mime);
-        else if (msg.type === 'reset') this.teardown();
+        else if (msg.type === 'reset') {
+          this.teardown();
+          const mode = state.status?.source?.mode;
+          if (mode && mode !== 'hdmi') refreshStatus();
+        }
         return;
       }
       this.queue.push(new Uint8Array(ev.data));

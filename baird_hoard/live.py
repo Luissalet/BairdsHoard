@@ -140,13 +140,22 @@ class LiveRemux:
                 return
             self._stop_proc()
 
-    def _stop_proc(self) -> None:
+    def _detach_proc(self) -> subprocess.Popen | None:
         proc = self._proc
         self._generation += 1
         self._init = b""
         self._proc = None
+        return proc
+
+    def _stop_proc(self) -> None:
+        self._close_proc(self._detach_proc())
+
+    @staticmethod
+    def _close_proc(proc: subprocess.Popen | None, *, discard: bool = False) -> None:
         if proc and proc.poll() is None:
             try:
+                if discard:
+                    proc.terminate()
                 if proc.stdin:
                     proc.stdin.close()
             except OSError:
@@ -159,12 +168,16 @@ class LiveRemux:
 
     def source_changed(self, running: bool) -> None:
         """The source changed (new capture session): viewers get a reset and a new init segment."""
-        with self._lock:
-            self._stop_proc()
-            if self._viewers:
-                self._broadcast({"type": "reset"})
-                if running:
-                    self._start()
+        previous = None
+        try:
+            with self._lock:
+                previous = self._detach_proc()
+                if self._viewers:
+                    self._broadcast({"type": "reset"})
+                    if running:
+                        self._start()
+        finally:
+            self._close_proc(previous, discard=not running)
 
     def stop(self) -> None:
         with self._lock:

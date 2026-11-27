@@ -222,6 +222,7 @@ class Library:
         if fmt not in ("png", "jpg"):
             raise BairdError("invalid", "fmt must be png or jpg")
         with self.engine.request():
+            local = self.engine.local_source()
             self.engine.wait_for_picture()
             inp = self.engine.snapshot().get("input") or {}
             region = parse_region(region, self.input_size())
@@ -238,6 +239,11 @@ class Library:
             proc = self._run(args, data=data, timeout=20)
             if proc.returncode == 0 and out.is_file() and out.stat().st_size > 0:
                 size = self._probe(out) if region else {"width": inp.get("width"), "height": inp.get("height")}
+                try:
+                    self.engine.require_local_policy(local)
+                except BairdError:
+                    out.unlink(missing_ok=True)
+                    raise
                 desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
                                       height=size.get("height"), taken=time.time(), region=region)
                 self._fire("on_new_image", out)
@@ -249,6 +255,8 @@ class Library:
     def grab_gray(self, region: Optional[dict[str, Any]] = None, size: tuple[int, int] = (96, 54)) -> bytes:
         """The newest picture (or ``region`` of it) shrunk to ``size`` in 8-bit grey: what change detection compares."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -260,6 +268,7 @@ class Library:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
                               "-fps_mode", "passthrough", "-frames:v", "1", "-f", "rawvideo", "pipe:1"], data=data, timeout=20)
             if proc.returncode == 0 and len(proc.stdout) == want:
+                self.engine.require_local_policy(local)
                 return proc.stdout
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -267,6 +276,8 @@ class Library:
         """The newest picture (or ``region``) as a PNG at ``dest`` (a BMP when ``dest`` ends in ``.bmp``: quicker to
         write), outside the library (OCR input). ``scale`` enlarges it first: small text reads better at twice the size."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -278,6 +289,11 @@ class Library:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
                               "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", codec, str(dest)], data=data, timeout=20)
             if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+                try:
+                    self.engine.require_local_policy(local)
+                except BairdError:
+                    dest.unlink(missing_ok=True)
+                    raise
                 return dest
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -285,6 +301,8 @@ class Library:
         """The newest picture (or ``region``) as JPEG bytes no larger than ``max_side``, with its width and height.
         Nothing is written to disk or to the library: this is what a guiding assistant looks at."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -298,6 +316,7 @@ class Library:
             if proc.returncode == 0 and proc.stdout:
                 width, height = jpeg_size(proc.stdout)
                 if width and height:
+                    self.engine.require_local_policy(local)
                     return proc.stdout, width, height
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -333,6 +352,7 @@ class Library:
     def clip(self, seconds: Optional[float] = None) -> dict[str, Any]:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
         with self.engine.request():
+            local = self.engine.local_source()
             self.engine.wait_for_picture()
             ff = self._need_ffmpeg()
             secs = float(seconds or self.settings["clip_seconds"])
@@ -369,7 +389,13 @@ class Library:
             except BairdError as exc:
                 log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
                 os.replace(raw, out)
-        return self._remember(out, origin="clip", enhanced=True if enhanced else None, **self._probe(out), probed=True)
+        info = self._probe(out)
+        try:
+            self.engine.require_local_policy(local)
+        except BairdError:
+            out.unlink(missing_ok=True)
+            raise
+        return self._remember(out, origin="clip", enhanced=True if enhanced else None, **info, probed=True)
 
     def enhance_copy(self, name: str, fx: dict[str, Any]) -> dict[str, Any]:
         """Start an enhanced copy of a video next to it (background job, the original stays as it is); returns the job."""

@@ -310,7 +310,9 @@ async def live(ws: WebSocket):
             if item is None:
                 break
             if isinstance(item, (bytes, bytearray)):
-                await ws.send_bytes(bytes(item))
+                local = svc.engine.local_source()
+                if local is None or local.producer is not None:
+                    await ws.send_bytes(bytes(item))
             else:
                 await ws.send_json(item)
     except (WebSocketDisconnect, RuntimeError):

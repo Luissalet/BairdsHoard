@@ -25,7 +25,7 @@ def app_key(app: str) -> str:
 
 
 class ScreenGate:
-    """Check the Hub before opening, then recheck while the source is producing."""
+    """Check the Hub before opening, during a capture session and before publishing a local picture."""
 
     def __init__(self, read_policy: Callable[[], ScreenPolicy], display_id: str,
                  display_present: Callable[[str], bool],

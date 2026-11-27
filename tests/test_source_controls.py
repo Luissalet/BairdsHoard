@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -144,13 +146,96 @@ def test_privacy_cut_drops_transport_data_before_listeners(rig, monkeypatch):
     assert activate(client).json()["active"]
 
 
-def test_old_remux_generation_cannot_enqueue_after_source_reset(rig):
+def test_old_remux_generation_cannot_enqueue_after_source_reset(rig, monkeypatch):
     _, svc, _ = rig
     live = svc.live
     seen = []
     live._viewers.append(SimpleNamespace(push=seen.append))
     old = live._generation
-    live.source_changed(False)
+
+    def check_cleanup(_proc, *, discard):
+        assert discard
+        assert seen == [{"type": "reset"}]
+        assert live._generation != old
+
+    with monkeypatch.context() as patch:
+        patch.setattr(live, "_close_proc", check_cleanup)
+        live.source_changed(False)
     live._broadcast({"type": "init"}, generation=old)
     live._broadcast(b"old picture", generation=old)
     assert seen == [{"type": "reset"}]
+
+
+def test_privacy_supervisor_cuts_a_silent_producer(rig, monkeypatch, ts_bytes):
+    client, svc, state = rig
+    waiting, stopped = threading.Event(), threading.Event()
+
+    class Stream(io.BytesIO):
+        def read1(self, _size):
+            data = self.read()
+            if data:
+                return data
+            waiting.set()
+            return b"" if stopped.wait(5) else pytest.fail("Producer was left running after privacy changed")
+
+    proc = SimpleNamespace(stdout=Stream(ts_bytes), stderr=io.BytesIO(), pid=101,
+                           terminate=stopped.set, poll=lambda: -15 if stopped.is_set() else None,
+                           wait=lambda **_: -15)
+    monkeypatch.setattr("baird_hoard.capture.subprocess.Popen", lambda *_, **__: proc)
+    monkeypatch.setattr("baird_hoard.capture.bind_to_app", lambda _: None)
+    monkeypatch.setattr(SyntheticSource, "command", lambda *_: ["synthetic-double"])
+
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine = svc.engine
+    with engine.request():
+        assert waiting.wait(5)
+        assert engine.snapshot()["state"] == "running" and engine.buffer.latest()[1]
+        state.policy = ScreenPolicy(True, ())
+        # The supervisor has to stop the producer before another byte or a picture request.
+        assert stopped.wait(2)
+        status = client.get("/api/status").json()
+        assert status["capture"]["state"] == "off" and status["capture"]["buffered_seconds"] == 0
+        assert status["source"]["blocked"] == "private"
+        assert call(client, svc, "screen_look", {"save": False}).json()["code"] == "no_signal"
+        assert client.post("/api/snapshot").status_code == 409
+        assert client.post("/api/clip").status_code == 409
+        assert client.post("/api/record/start").status_code == 409
+
+
+def test_picture_request_rechecks_policy_even_with_recent_data(rig, monkeypatch, ts_bytes):
+    client, svc, state = rig
+    engine = svc.engine
+    monkeypatch.setattr(engine, "_start", lambda: None)
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine.buffer.feed(ts_bytes)
+    engine._set(state="running")
+    state.policy = ScreenPolicy(True, ())
+    assert call(client, svc, "screen_look", {"save": False}).json()["code"] == "no_signal"
+    assert engine.buffer.latest() == (b"", 0)
+
+
+def test_revoke_during_snapshot_discards_the_decoded_file(rig, monkeypatch, ts_bytes):
+    client, svc, state = rig
+    engine = svc.engine
+    monkeypatch.setattr(engine, "_start", lambda: None)
+    assert choose(client).status_code == 200
+    assert activate(client).json()["active"]
+    engine.buffer.feed(ts_bytes)
+    engine._set(state="running")
+
+    outputs = []
+
+    def decode(args, **_):
+        dest = Path(args[-1])
+        dest.write_bytes(b"decoded")
+        outputs.append(dest)
+        state.policy = ScreenPolicy(True, ())
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(svc.library, "_run", decode)
+    response = client.post("/api/snapshot")
+    assert response.status_code == 409
+    assert len(outputs) == 1 and not outputs[0].exists()
+    assert engine.buffer.latest() == (b"", 0)
