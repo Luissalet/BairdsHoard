@@ -252,6 +252,28 @@ def test_pending_look_never_repopulates_revoked_cache(rendered_picture, monkeypa
     assert not svc.copilot._looks and svc.copilot._last_look is None
 
 
+@pytest.mark.parametrize(("reason", "status"), [("privacy_blocked", 409), ("policy_unavailable", 503)])
+def test_producer_privacy_block_clears_agent_look_and_allows_human_disarm(rendered_picture, monkeypatch, reason, status):
+    client, svc = rendered_picture
+    monkeypatch.setattr(svc.library, "grab_jpeg", lambda *args: (b"synthetic-jpeg", 160, 90))
+    visible = agent(client, "copilot_look")
+    assert visible.status_code == 200 and svc.copilot._looks
+    url = f"/copilot/look/{visible.json()['look']}.jpg"
+    proc = object()
+    svc.engine._proc = proc
+    try:
+        svc.engine._block_for_privacy(proc, reason, "Stopped by the producer")
+    finally:
+        svc.engine._proc = None
+    assert agent(client, "source_list").json()["blocked"] == reason
+    assert not svc.copilot._looks
+    assert client.get(url).status_code == status
+    blocked = agent(client, "screen_look")
+    assert blocked.status_code == status and blocked.json()["code"] == reason
+    set_local_capture(client, False)
+    assert agent(client, "screen_look").json()["code"] == "source_off"
+
+
 def test_selection_undo_restores_the_previous_monitor_off(profile):
     client, svc = profile
     displays = agent(client, "source_list").json()["monitors"]

@@ -49,7 +49,8 @@ def _focus(svc, expected: SourceArgs | None, live: bool) -> tuple:
     if live and mode != "hdmi":
         if state["blocked"]:
             raise BairdError(state["blocked"], "The local screen is blocked.",
-                             "Ask the person to check the source in Baird.", status=409)
+                             "Ask the person to check the source in Baird.",
+                             status=503 if state["blocked"] == "policy_unavailable" else 409)
         if not state["active"]:
             raise BairdError("source_off", "The local screen is off.",
                              "Ask the person to turn it on in Baird.", status=403)
@@ -136,7 +137,13 @@ class ProfileSources:
             local = svc.monitor_source is not None
             selection = settings["monitor"] if local else None
             active = settings["capture_enabled"] and (not local or selection is not None)
-            blocked = "monitor_reselect" if local and active and svc.engine.snapshot()["state"] == "reselect" else None
+            blocked = None
+            if local and active:
+                engine = svc.engine.snapshot()
+                if engine["state"] == "reselect":
+                    blocked = "monitor_reselect"
+                elif engine["state"] == "privacy_blocked":
+                    blocked = engine["privacy"]
             monitors = []
             if local and list_displays:
                 monitors = [{**display, "left": display["x"], "top": display["y"]}
@@ -161,8 +168,9 @@ class ProfileSources:
         with self.lock:
             state = self.status(list_displays=True)
             selection = self._services.settings["monitor"]
+            armed = self._services.settings["capture_enabled"]
             display = next((item for item in state["monitors"] if item["selection"] == selection), None)
-            if display is None or state["blocked"]:
+            if display is None:
                 return {"active": False, "display": None, "ticket": None}
             now = time.monotonic()
             self._controls = {key: grant for key, grant in self._controls.items() if grant.expires > now}
@@ -170,9 +178,9 @@ class ProfileSources:
                 self._controls.pop(next(iter(self._controls)))
             ticket = token_urlsafe(32)
             self._controls[ticket] = CaptureControl(session, self._revision, state["monitor"],
-                                                    state["active"], now + CONTROL_LIFETIME)
+                                                    armed, now + CONTROL_LIFETIME)
             shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
-            return {"active": state["active"], "display": shown, "ticket": ticket}
+            return {"active": armed, "display": shown, "ticket": ticket}
 
     def set_capture(self, *, session: str, ticket: str, enabled: bool) -> None:
         with self.lock:
@@ -181,7 +189,7 @@ class ProfileSources:
                 raise activation_required()
             del self._controls[ticket]
             state = self.status()
-            if (grant.expires <= time.monotonic() or grant.revision != self._revision or state["blocked"]
+            if (grant.expires <= time.monotonic() or grant.revision != self._revision or (state["blocked"] and enabled)
                     or grant.monitor != state["monitor"] or grant.active == enabled):
                 raise activation_required()
             if enabled:
