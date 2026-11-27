@@ -294,14 +294,8 @@ def _region(a: Any) -> Optional[dict[str, Any]]:
 
 
 def _look(svc: Services, a: LookArgs) -> dict[str, Any]:
-    shot = svc.library.snapshot("png", _region(a))
-    from pathlib import Path
-    image = svc.library.image_for_model(Path(shot["path"]), a.max_side)
-    out = {"name": shot["name"], "path": shot["path"], "width": shot.get("width"), "height": shot.get("height"), "_image": image}
-    if not a.save:
-        svc.library.delete(shot["name"])
-        out.update(name=None, path=None)
-    return out
+    shot = svc.library.snapshot("png", _region(a), model_max_side=a.max_side, save=a.save)
+    return {key: shot[key] for key in ("name", "path", "width", "height", "_image")}
 
 
 def send_to_faustus(svc: Services, a: SendArgs) -> dict[str, Any]:

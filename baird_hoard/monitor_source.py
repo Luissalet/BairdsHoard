@@ -109,3 +109,17 @@ class MonitorSource:
     def initial_state(self) -> dict[str, Any]:
         return {"source": "monitor", "device": "", "encoder": "", "audio": False,
                 "audio_level": 0.0, "microphone_level": None}
+
+
+@dataclass(frozen=True)
+class BoundMonitorSource:
+    source: MonitorSource
+    monitor: str
+    layout: str
+    graceful_stop = True
+
+    def command(self, settings: Settings) -> list[str]:
+        return self.source.command_for({"id": self.monitor, "layout": self.layout}, settings)
+
+    def initial_state(self) -> dict[str, Any]:
+        return self.source.initial_state()

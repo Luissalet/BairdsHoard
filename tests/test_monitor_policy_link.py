@@ -10,16 +10,18 @@ from contextlib import contextmanager
 from types import ModuleType
 
 import pytest
+from fastapi.testclient import TestClient
 
 from baird_hoard import capture, monitor_windows, monitor_worker
 from baird_hoard.config import Config
+from baird_hoard.main import create_app
 from baird_hoard.monitor_input import feed_samples
 from baird_hoard.monitor_privacy import configured_policy
 from baird_hoard.monitor_source import worker_command
 from baird_hoard.services import Services
 
 from .test_monitor_privacy import HubDouble
-from .test_monitor_source import MONITOR, choose
+from .test_monitor_source import MONITOR, confirm_test_shortcut, set_local_capture
 
 
 @pytest.mark.parametrize(("policy_change", "cutoff"), [
@@ -50,10 +52,14 @@ def test_default_monitor_command_connects_configured_hub(monkeypatch, tmp_path, 
     monkeypatch.setattr("baird_hoard.services.ffmpeg_path", lambda: "double-ffmpeg")
     monkeypatch.setattr("baird_hoard.services.ffprobe_path", lambda _ffmpeg: None)
     config = Config.from_env()
-    svc = Services(config)
-    svc.settings.update({"monitor": choose(MONITOR, [MONITOR]), "capture_enabled": True, "ocr_auto": False})
-    assert svc.monitor_source.worker is worker_command and svc.engine._thread is None
-    command = svc.engine._command()
+    svc = Services(config, confirm_capture=confirm_test_shortcut)
+    svc.settings.update({"ocr_auto": False})
+    with TestClient(create_app(config, svc), base_url="http://127.0.0.1:17697", client=("127.0.0.1", 50000)) as client:
+        assert svc.monitor_source.worker is worker_command and svc.engine._thread is None
+        selected = svc.sources.select("monitor", MONITOR.id)
+        assert not selected["active"] and selected["modes"] == ["hdmi", "monitor", "overlay"]
+        set_local_capture(client, True)
+        command = svc.engine.local_source().producer.command(svc.settings)
     assert command[1:3] == ["-m", "baird_hoard.monitor_worker"]
     assert command[-2:] == ["--policy-provider", "monitor_test_hub:connect"]
     monkeypatch.setattr(sys, "argv", command[2:])
@@ -97,11 +103,8 @@ def test_default_monitor_command_connects_configured_hub(monkeypatch, tmp_path, 
     monkeypatch.setattr(monitor_worker, "audio_helper", lambda _work_dir: "double-audio")
     monkeypatch.setattr(monitor_worker, "available_encoders", lambda _ffmpeg: {"libx264"})
     monkeypatch.setattr(monitor_worker, "open_guarded_encoder", open_double)
-    try:
-        assert monitor_worker.main() == 1
-    finally:
-        svc.stop()
-    assert linked_scopes == ["connected"]
+    assert monitor_worker.main() == 1
+    assert linked_scopes == ["connected", "connected"]
     assert acquired == ["audio", "video"]
     assert len(reads) == 2 and feed.getvalue().count(b"00db") == 1
     assert json.loads(capsys.readouterr().err)["code"] == cutoff

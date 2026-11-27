@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/hoard-theme.css">
   <link rel="stylesheet" href="/app.css">
   <link rel="stylesheet" href="/copilot.css">
+  <link rel="stylesheet" href="/sources.css">
 </head>
 <body>
   <header class="top">
@@ -26,6 +27,21 @@
     </div>
   </header>
 
+  <div class="source-bar" id="source-bar" hidden>
+    <div class="source-picker">
+      <label for="source-mode" id="source-label">Fuente</label>
+      <select id="source-mode">
+        <option value="hdmi">Capturadora</option>
+        <option value="monitor">Otra pantalla</option>
+        <option value="overlay">Overlay</option>
+      </select>
+    </div>
+    <select id="source-display" aria-label="Pantalla" hidden></select>
+    <button class="btn" id="source-toggle" type="button" hidden>Empezar a mirar</button>
+    <span class="source-indicator" id="source-indicator" role="status"></span>
+    <span id="source-failure" role="alert" hidden></span>
+  </div>
+
   <main class="layout">
     <section class="stage-wrap">
       <div class="stage" id="stage">
@@ -36,6 +52,7 @@
           <button class="btn" id="btn-retry" type="button" hidden>Reintentar ahora</button>
         </div>
         <div class="rec-badge" id="rec-badge" hidden><span class="rec-dot"></span><span id="rec-time">0:00</span></div>
+        <span class="source-indicator source-stage-indicator" id="source-stage-indicator" aria-hidden="true" hidden></span>
         <div class="flash" id="flash"></div>
         <div class="zone-layer" id="zone-layer" hidden>
           <div class="zone-hint" id="zone-hint">Arrastra sobre la imagen para elegir la zona · Esc cancela</div>
@@ -273,6 +290,7 @@
   </dialog>
 
   <div class="toasts" id="toasts"></div>
+  <script src="/sources.js"></script>
   <script src="/app.js"></script>
   <script src="/review.js"></script>
   <script src="/copilot.js"></script>

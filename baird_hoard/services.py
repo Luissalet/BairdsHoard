@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
+from contextlib import contextmanager
 from typing import Any
 
 from . import __version__
@@ -21,11 +23,14 @@ from .hoard_link.tokens import read_or_create_token
 from .hotkeys import HotkeyHelper
 from .live import LiveRemux
 from .media import Library
-from .monitor_source import MonitorSource, normalize_selection, selected_monitor
+from .monitor_privacy import PolicySnapshot, configured_policy
+from .monitor_source import BoundMonitorSource, MonitorSource, normalize_selection, selected_monitor
 from .native import NATIVE_DIR
 from .ocr import OcrIndex, fold
 from .overlay import CopilotOverlay, OverlayDisplay, selected_overlay_display
 from .recording_search import RecordingSearch
+from .screen_privacy import ScreenPolicy, ScreenPolicySubscription
+from .source_controls import Display, ScreenBackend, Selection, SourceControls
 from .textmap import TextReader
 from .transcribe import Transcriber
 from .tsbuf import TsBuffer
@@ -38,7 +43,9 @@ HOTKEY_KEYS = ("hotkeys_enabled", "hotkey_shot", "hotkey_clip")
 
 class Services:
     def __init__(self, config: Config, *, monitor_source: MonitorSource | None = None,
-                 confirm_capture: ConfirmCapture = confirm_with_windows):
+                 confirm_capture: ConfirmCapture = confirm_with_windows, screen_backend: ScreenBackend | None = None,
+                 read_screen_policy: Callable[[], ScreenPolicy] | None = None,
+                 subscribe_screen_policy: ScreenPolicySubscription | None = None):
         self.config = config
         config.paths.ensure()
         self.settings = Settings(config.settings_path, isolated_instance=config.isolated_instance)
@@ -54,17 +61,41 @@ class Services:
             )
             if self.settings["capture_enabled"]:
                 self.settings.update({"capture_enabled": False})
-        source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
+        # An injected producer without an authority can still exercise the fixed profile contract.
+        native_selector = self.monitor_source is not None and (
+            monitor_source is None or self.monitor_source.policy_provider is not None or read_screen_policy is not None)
+        fixed_monitor = self.monitor_source is not None and not native_selector
+        source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source if fixed_monitor else None
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
-                                    fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,
-                                    graceful_stop=self.monitor_source is not None,
-                                    source_cwd=REPO_ROOT if self.monitor_source is not None else NATIVE_DIR)
+                                    fake_source=config.fake_source, source=source, demand_only=fixed_monitor,
+                                    graceful_stop=fixed_monitor,
+                                    source_cwd=REPO_ROOT if fixed_monitor else NATIVE_DIR,
+                                    local_source_cwd=REPO_ROOT if native_selector else None)
         self.live = LiveRemux(self.engine, self.ffmpeg)
         self.enhancer = Enhancer(self.ffmpeg, self.ffprobe, config.work_dir)
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)
         self.live_enhanced = LiveRemux(StageSource(self.stage), self.ffmpeg)  # type: ignore[arg-type]
         self.library = Library(config, self.settings, self.buffer, self.engine, self.ffmpeg, self.ffprobe)
-        self.sources = ProfileSources(self, confirm_capture)
+        def recording_state():
+            return self.library.recorder.status()["state"]
+
+        if native_selector:
+            monitor = self.monitor_source
+            screen_backend = screen_backend or self._monitor_backend(monitor, read_screen_policy)
+            saved = self.settings["monitor"] or {}
+            initial = Selection("overlay" if config.overlay_mode else "monitor", saved.get("id"), saved.get("layout"))
+            def prepare_change(choice: Selection) -> None:
+                binding = {"id": choice.monitor, "layout": choice.layout} if choice.monitor else None
+                self.settings.update({"monitor": binding, "capture_enabled": False})
+
+            selector = SourceControls(self.engine, recording_state, screen_backend, read_screen_policy,
+                                      subscribe_screen_policy, initial=initial, prepare_change=prepare_change)
+            self.sources = ProfileSources(self, confirm_capture, selector=selector)
+        elif screen_backend is not None:
+            self.sources = SourceControls(self.engine, recording_state, screen_backend, read_screen_policy,
+                                          subscribe_screen_policy)
+        else:
+            self.sources = ProfileSources(self, confirm_capture)
         self.transcriber = Transcriber(self.library)
         self.library.attach_enhancer(self.enhancer, self.stage)
         self.ocr = OcrIndex(config.data_dir / "ocr-index.json", self.library, self.settings, background=config.background)
@@ -87,6 +118,38 @@ class Services:
         self.copilot.capture_publication = lambda: capture_publication(self)
         self.started = time.time()
 
+    @staticmethod
+    def _monitor_backend(monitor: MonitorSource, read_override) -> ScreenBackend:
+        def displays():
+            return [Display(row["id"], row["name"], row["width"], row["height"], row["x"], row["y"],
+                            row["selection"]["layout"]) for row in monitor.list_monitors()]
+
+        authority = configured_policy(monitor.policy_provider)
+
+        def snapshot(display: Display) -> PolicySnapshot:
+            state = authority.read(display.id, display.layout) if authority is not None else None
+            if (not isinstance(state, PolicySnapshot) or type(state.revision) is not int
+                    or any(type(flag) is not bool for flag in (state.private, state.excluded, state.audio_excluded))):
+                raise ConnectionError("Screen privacy could not be confirmed.")
+            return state
+
+        def read(display: Display) -> ScreenPolicy:
+            state = snapshot(display)
+            return ScreenPolicy(state.private, (), state.excluded or state.audio_excluded)
+
+        @contextmanager
+        def permit(display: Display):
+            state = snapshot(display)
+            if state.private or state.excluded or state.audio_excluded:
+                yield False
+                return
+            with authority.lease(display.id, display.layout, state.revision, "video") as confirmed:
+                yield confirmed
+
+        return ScreenBackend(displays, lambda display: BoundMonitorSource(monitor, display.id, display.layout),
+                             lambda _display: None, None if read_override is not None else read,
+                             permit if authority is not None else None)
+
     def _overlay_display(self) -> OverlayDisplay | None:
         if self.engine.snapshot()["state"] != "running":
             return None
@@ -105,6 +168,8 @@ class Services:
             self._start_hotkeys()
 
     def stop(self) -> None:
+        if isinstance(self.sources, (ProfileSources, SourceControls)):
+            self.sources.close()
         self.recordings.stop()
         self.transcriber.detail.cancel(closing=True)
         self.copilot.close()
@@ -149,6 +214,8 @@ class Services:
         self.library.recorder.on_capture_state(state)
         if state == "privacy_blocked":
             self.library.recorder.source_changed()
+        if state != "running" and previous == "running":
+            self.copilot.clear_looks()
         self.stage.raw_state(state == "running")
         if state == "reselect" or (state == "privacy_blocked" and previous != state):
             with self.sources.lock:
@@ -178,6 +245,14 @@ class Services:
         before = self.settings.get()
         if self.monitor_source is not None and changes.get("monitor") is not None:
             selected_monitor(normalize_selection(changes["monitor"]), self.monitor_source.inventory())
+        selector = self.sources.selector if isinstance(self.sources, ProfileSources) else None
+        if selector is not None and selector.selection.mode != "hdmi":
+            if "monitor" in changes:
+                binding = normalize_selection(changes["monitor"])
+                self.sources.select(selector.selection.mode, binding["id"] if binding else None)
+            if ("monitor_microphone" in changes and before["monitor_microphone"] != changes["monitor_microphone"]
+                    and self.engine.source_enabled()):
+                self.sources.set_active(False)
         after = self.settings.update(changes)
         if isinstance(self.sources, ProfileSources):
             self.sources.settings_applied(before, after)

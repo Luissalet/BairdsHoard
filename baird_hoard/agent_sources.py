@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .capture_approval import APPROVAL_KEYS, APPROVAL_SECONDS, ConfirmCapture
 from .errors import BairdError
 from .monitor_source import DesktopMonitor, selected_monitor
+from .source_controls import SourceControls
 
 SourceMode = Literal["hdmi", "monitor", "overlay"]
 
@@ -48,6 +49,8 @@ def _focus(svc, expected: SourceArgs | None, live: bool) -> tuple:
             raise BairdError("source_mismatch", "The requested source is not selected.",
                              "Use source_list to check the selection.", status=409)
     if live and mode != "hdmi":
+        if isinstance(svc.sources, SourceControls) and (state["blocked"] or not state["active"]):
+            raise BairdError("no_signal", "The capture source is no longer available.", state="off")
         if state["blocked"]:
             raise BairdError(state["blocked"], "The local screen is blocked.",
                              "Ask the person to check the source in Baird.",
@@ -95,10 +98,15 @@ def call_on_source(svc, expected: SourceArgs | None, run: Callable[[], Any], *, 
     if not live:
         return run()
     permit = SourcePermit(svc, expected, original)
+    integrated = getattr(svc.sources, "selector", None) is not None
+    local = svc.engine.local_source() if integrated else None
     token = _live_permit.set(permit)
     try:
         result = run()
         if not permit.committed:
+            if integrated:
+                with permit.publish(finalizes_call=False), svc.engine.media_publication(local):
+                    return result
             permit.check()
         return result
     finally:
@@ -138,9 +146,10 @@ class ProfileSources:
     operations when the live selector is composed with the monitor backend.
     """
 
-    def __init__(self, services, confirm_capture: ConfirmCapture):
+    def __init__(self, services, confirm_capture: ConfirmCapture, *, selector: SourceControls | None = None):
         self._services = services
-        self.lock = threading.RLock()
+        self.selector = selector
+        self.lock = selector.lock if selector is not None else threading.RLock()
         self._revision = 0
         self._undo: tuple[str, int, dict[str, str] | None] | None = None
         self._controls: dict[str, CaptureControl] = {}
@@ -151,6 +160,16 @@ class ProfileSources:
     def status(self, *, list_displays: bool = False) -> dict[str, Any]:
         svc = self._services
         with self.lock:
+            if self.selector is not None:
+                state = self.selector.status(list_displays=list_displays)
+                displays = [{**row, "x": row["left"], "y": row["top"],
+                             "selection": {"id": row["id"], "layout": row["layout"]}}
+                            for row in state["monitors"]]
+                codes = {"private": "privacy_blocked", "excluded": "application_excluded",
+                         "missing_display": "monitor_reselect"}
+                return {**state, "monitors": displays, "requires_confirmation": True,
+                        "blocked": codes.get(state["blocked"], state["blocked"]),
+                        "revision": self._revision}
             settings = svc.settings.get()
             local = svc.monitor_source is not None
             selection = settings["monitor"] if local else None
@@ -169,7 +188,7 @@ class ProfileSources:
             mode = ("overlay" if svc.config.overlay_mode else "monitor") if local else "hdmi"
             return {"mode": mode, "modes": [mode], "monitor": selection["id"] if selection else None,
                     "active": bool(active and not blocked), "blocked": blocked, "monitors": monitors,
-                    "revision": self._revision}
+                    "revision": self._revision, "requires_confirmation": local}
 
     def overlay_monitor(self) -> DesktopMonitor | None:
         """Read the selected physical geometry without taking the source lock.
@@ -178,10 +197,11 @@ class ProfileSources:
         Source changes also clear copilot state while holding the source lock.
         """
         svc = self._services
-        if not svc.config.overlay_mode or svc.monitor_source is None:
+        overlay = self.selector.selection.mode == "overlay" if self.selector is not None else svc.config.overlay_mode
+        if not overlay or svc.monitor_source is None:
             return None
         settings = svc.settings.get()
-        if not settings["capture_enabled"] or settings["monitor"] is None:
+        if not self._armed() or settings["monitor"] is None:
             return None
         try:
             return selected_monitor(settings["monitor"], svc.monitor_source.inventory())
@@ -200,12 +220,36 @@ class ProfileSources:
         if self._pending_capture is not None:
             self._pending_capture.cancelled.set()
 
+    def close(self) -> None:
+        if self.selector is not None:
+            self.selector.close()
+
+    def _armed(self) -> bool:
+        if self.selector is not None:
+            return self._services.engine.source_enabled()
+        return self._services.settings["capture_enabled"]
+
+    def set_active(self, active: bool) -> dict[str, Any]:
+        with self.lock:
+            if self.selector is None or active:
+                raise activation_required()
+            self.selector.set_active(False)
+            self.advance_revision()
+            return self.status()
+
+    def _set_confirmed(self) -> None:
+        if self.selector is None:
+            self._services.apply_settings({"capture_enabled": True})
+        else:
+            self.selector.set_active(True)
+            self.advance_revision()
+
     def capture_control(self, session: str) -> dict[str, Any]:
         """Issue a single-use control for the display shown to the person."""
         with self.lock:
             state = self.status(list_displays=True)
             selection = self._services.settings["monitor"]
-            armed = self._services.settings["capture_enabled"]
+            armed = self._armed()
             display = next((item for item in state["monitors"] if item["selection"] == selection), None)
             if display is None:
                 return {"active": False, "display": None, "ticket": None}
@@ -224,7 +268,7 @@ class ProfileSources:
         state = self.status()
         if (grant.expires <= time.monotonic() or grant.revision != self._revision
                 or grant.mode != state["mode"] or (state["blocked"] and enabled)
-                or grant.monitor != state["monitor"] or grant.active != svc.settings["capture_enabled"]
+                or grant.monitor != state["monitor"] or grant.active != self._armed()
                 or grant.active == enabled):
             raise activation_required()
         if enabled:
@@ -238,7 +282,10 @@ class ProfileSources:
             del self._controls[ticket]
             self._validate_control(grant, enabled)
             if not enabled:
-                self._services.apply_settings({"capture_enabled": False})
+                if self.selector is None:
+                    self._services.apply_settings({"capture_enabled": False})
+                else:
+                    self.set_active(False)
                 return
             if self._pending_capture is not None:
                 raise BairdError("source_approval_pending", "A local capture confirmation is already pending.", status=409)
@@ -260,7 +307,7 @@ class ProfileSources:
                 if approved is not True or not pending.registered.is_set() or pending.cancelled.is_set():
                     raise BairdError("source_approval_required", "Confirm the selected screen with the Windows shortcut shown in Baird.", status=403)
                 self._validate_control(grant, True)
-                self._services.apply_settings({"capture_enabled": True})
+                self._set_confirmed()
         finally:
             with self.lock:
                 self._pending_capture = None
@@ -289,6 +336,10 @@ class ProfileSources:
     def select(self, mode: SourceMode, monitor: str | None = None) -> dict[str, Any]:
         svc = self._services
         with self.lock:
+            if self.selector is not None:
+                if mode == "hdmi" and monitor is not None:
+                    raise BairdError("invalid", "HDMI does not use a monitor ID.")
+                return self._select_integration(lambda: self.selector.select(mode, monitor))
             state = self.status()
             if mode != state["mode"]:
                 raise BairdError("capture_unavailable", "This source is unavailable in the current profile.",
@@ -312,8 +363,20 @@ class ProfileSources:
             self._undo = (token, self._revision, earlier)
             return {**self.status(), "undo_token": token}
 
+    def _select_integration(self, change: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        previous = self.selector.selection
+        state = change()
+        selection = self.selector.selection
+        if state.get("undo_token") or previous != selection:
+            self._services.copilot.clear_looks()
+            self.advance_revision()
+        status = self.status()
+        return {**status, **{key: state[key] for key in ("undo_token",) if key in state}}
+
     def undo(self, token: str) -> dict[str, Any]:
         with self.lock:
+            if self.selector is not None:
+                return self._select_integration(lambda: self.selector.undo(token))
             if self._undo is None or self._undo[:2] != (token, self._revision):
                 raise BairdError("conflict", "That source change can no longer be undone.")
             self._check_recording()

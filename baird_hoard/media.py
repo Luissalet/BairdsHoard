@@ -32,7 +32,7 @@ from tempfile import TemporaryDirectory
 from urllib.parse import quote
 from typing import Any, Callable, Optional
 
-from .capture import CaptureEngine
+from .capture import CaptureEngine, LocalSource
 from .config import Config, Settings
 from .errors import BairdError
 from .hoard_link.atomic import read_json, write_json_atomic
@@ -111,6 +111,15 @@ class Library:
             path = folder / f"{base} ({n}){ext}"
             n += 1
         return path
+
+    def _publish_capture(self, staged: Path, local: LocalSource | None,
+                         prefix: str, suffix: str = "", *, publication, **meta: Any) -> dict[str, Any]:
+        # A direct child of the media folder becomes visible to the library in one rename.
+        with publication, self._lock:
+            target = self._new_path(prefix, staged.suffix, suffix, folder=staged.parent.parent)
+            with self.engine.media_publication(local):
+                os.replace(staged, target)
+            return self._remember(target, **meta)
 
     def _need_ffmpeg(self) -> str:
         if not self.ffmpeg:
@@ -220,47 +229,57 @@ class Library:
 
     def snapshot(self, fmt: Optional[str] = None, region: Optional[dict[str, Any]] = None, *,
                  prefix: Optional[str] = None, origin: Optional[str] = None,
+                 model_max_side: int | None = None, save: bool = True,
                  finalizes_call: bool = False) -> dict[str, Any]:
-        """Save the current picture (or only ``region`` of it); returns its description."""
+        """Decode the current picture, then publish the requested file or model image."""
         publication = self.capture_publication(finalizes_call=finalizes_call)
         ff = self._need_ffmpeg()
         fmt = (fmt or self.settings["snapshot_format"]).lower()
         if fmt not in ("png", "jpg"):
             raise BairdError("invalid", "fmt must be png or jpg")
         with self.engine.request():
+            local = self.engine.local_source()
             self.engine.wait_for_picture()
             inp = self.engine.snapshot().get("input") or {}
             region = parse_region(region, self.input_size())
             data, frames = self.buffer.latest()
             if not data:
                 raise BairdError("no_signal", "No picture has arrived yet.", "Wait a second and try again.")
-        folder = self.folder
-        enc = ["-c:v", "png"] if fmt == "png" else ["-q:v", "2"]
-        last_err = ""
-        # A staged image is never listed or served. Keep it on the destination volume for the atomic move.
-        with TemporaryDirectory(prefix=".baird-capture-", dir=folder) as staging:
-            draft = Path(staging) / f"picture.{fmt}"
-            for index in (max(0, frames - 2), 0):
-                vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
-                args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an",
-                        "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(draft)]
-                proc = self._run(args, data=data, timeout=20)
-                if proc.returncode == 0 and draft.is_file() and draft.stat().st_size > 0:
-                    size = self._probe(draft) if region else {"width": inp.get("width"), "height": inp.get("height")}
-                    with publication, self._lock:
-                        out = self._new_path(prefix or ("Captura zona" if region else "Captura"), "." + fmt, folder=folder)
-                        os.replace(draft, out)
-                        desc = self._remember(out, origin=origin or ("zone" if region else "snapshot"), width=size.get("width"),
-                                              height=size.get("height"), taken=time.time(), region=region)
-                    self._fire("on_new_image", out)
-                    return desc
-                draft.unlink(missing_ok=True)
-                last_err = proc.stderr.decode("utf-8", "replace")[-300:]
-        raise BairdError("failed", "Could not decode the picture.", last_err)
+            with TemporaryDirectory(prefix=".baird-capture-", dir=self.folder) as temp:
+                staged = Path(temp) / ("picture." + fmt)
+                enc = ["-c:v", "png"] if fmt == "png" else ["-q:v", "2"]
+                last_err = ""
+                for index in (max(0, frames - 2), 0):
+                    vf = f"select=eq(n\\,{index})" + ("," + crop_filter(region) if region else "")
+                    args = [ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an",
+                            "-vf", vf, "-fps_mode", "passthrough", "-frames:v", "1", *enc, str(staged)]
+                    proc = self._run(args, data=data, timeout=20)
+                    if proc.returncode == 0 and staged.is_file() and staged.stat().st_size > 0:
+                        break
+                    staged.unlink(missing_ok=True)
+                    last_err = proc.stderr.decode("utf-8", "replace")[-300:]
+                else:
+                    raise BairdError("failed", "Could not decode the picture.", last_err)
+                size = self._probe(staged) if region else inp
+                size = {"width": size.get("width"), "height": size.get("height")}
+                image = self.image_for_model(staged, model_max_side) if model_max_side is not None else None
+                if save:
+                    desc = self._publish_capture(staged, local, prefix or ("Captura zona" if region else "Captura"),
+                                                 origin=origin or ("zone" if region else "snapshot"),
+                                                 taken=time.time(), region=region, publication=publication, **size)
+                    self._fire("on_new_image", Path(desc["path"]))
+                else:
+                    with publication, self.engine.media_publication(local):
+                        desc = {"name": None, "path": None, **size}
+                if image is not None:
+                    desc["_image"] = image
+                return desc
 
     def grab_gray(self, region: Optional[dict[str, Any]] = None, size: tuple[int, int] = (96, 54)) -> bytes:
         """The newest picture (or ``region`` of it) shrunk to ``size`` in 8-bit grey: what change detection compares."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -272,6 +291,7 @@ class Library:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
                               "-fps_mode", "passthrough", "-frames:v", "1", "-f", "rawvideo", "pipe:1"], data=data, timeout=20)
             if proc.returncode == 0 and len(proc.stdout) == want:
+                self.engine.require_local_policy(local)
                 return proc.stdout
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -279,6 +299,8 @@ class Library:
         """The newest picture (or ``region``) as a PNG at ``dest`` (a BMP when ``dest`` ends in ``.bmp``: quicker to
         write), outside the library (OCR input). ``scale`` enlarges it first: small text reads better at twice the size."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -290,6 +312,11 @@ class Library:
             proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-an", "-vf", vf,
                               "-fps_mode", "passthrough", "-frames:v", "1", "-c:v", codec, str(dest)], data=data, timeout=20)
             if proc.returncode == 0 and dest.is_file() and dest.stat().st_size > 0:
+                try:
+                    self.engine.require_local_policy(local)
+                except BairdError:
+                    dest.unlink(missing_ok=True)
+                    raise
                 return dest
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -297,6 +324,8 @@ class Library:
         """The newest picture (or ``region``) as JPEG bytes no larger than ``max_side``, with its width and height.
         Nothing is written to disk or to the library: this is what a guiding assistant looks at."""
         ff = self._need_ffmpeg()
+        local = self.engine.local_source()
+        self.engine.require_local_policy(local)
         data, frames = self.buffer.latest()
         if not data:
             raise BairdError("no_signal", "No picture has arrived yet.")
@@ -310,6 +339,7 @@ class Library:
             if proc.returncode == 0 and proc.stdout:
                 width, height = jpeg_size(proc.stdout)
                 if width and height:
+                    self.engine.require_local_policy(local)
                     return proc.stdout, width, height
         raise BairdError("failed", "Could not decode the picture.")
 
@@ -346,11 +376,11 @@ class Library:
         """Save the last ``seconds`` (default: the clip setting) as MP4."""
         publication = self.capture_publication(finalizes_call=True)
         with self.engine.request():
+            local = self.engine.local_source()
             self.engine.wait_for_picture()
             ff = self._need_ffmpeg()
             secs = float(seconds or self.settings["clip_seconds"])
-            # The enhanced picture is used as it was shown when it already covers the span; otherwise the original
-            # span is saved and put through the same chain (below), so the clip is as long as asked either way.
+            # Prefer the enhanced buffer when it covers the requested span.
             source, enhanced, enhance_after = self.buffer, False, self.wants_enhanced()
             if enhance_after and self.stage.buffer.seconds_kept() >= 0.9 * min(secs, self.buffer.seconds_kept()):
                 source, enhanced, enhance_after = self.stage.buffer, True, False
@@ -359,35 +389,31 @@ class Library:
                 raise BairdError("invalid", f"At most {self.settings['buffer_seconds']} s are kept in memory.",
                                  "Raise buffer_seconds in the settings for longer clips, or record.")
             parts = source.since(secs)
-        if not parts:
-            raise BairdError("no_signal", "Nothing is in memory yet.")
-        folder = self.folder
-        with TemporaryDirectory(prefix=".baird-capture-", dir=folder) as staging:
-            draft = Path(staging) / "clip.mp4"
-            raw = draft.with_name("source.mp4") if enhance_after else draft
-            tmp = self.config.work_dir / f"clip-{uuid.uuid4().hex[:8]}.ts"
-            try:
-                tmp.write_bytes(b"".join(parts))
-                proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(tmp),
+            if not parts:
+                raise BairdError("no_signal", "Nothing is in memory yet.")
+            with TemporaryDirectory(prefix=".baird-capture-", dir=self.folder) as temp:
+                work = Path(temp)
+                transport = work / "clip.ts"
+                transport.write_bytes(b"".join(parts))
+                staged = work / "clip.mp4"
+                raw = work / "raw.mp4" if enhance_after else staged
+                proc = self._run([ff, "-hide_banner", "-loglevel", "error", "-y", "-fflags", "+genpts", "-i", str(transport),
                                   "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-bsf:a", "aac_adtstoasc",
                                   "-movflags", "+faststart", str(raw)], timeout=120)
                 if proc.returncode != 0 or not raw.is_file():
                     raise BairdError("failed", "Could not write the clip.", proc.stderr.decode("utf-8", "replace")[-300:])
-            finally:
-                tmp.unlink(missing_ok=True)
-            if enhance_after:
-                try:
-                    fx = dict(self.settings["enhance"], hdr=False)  # Clips are SDR.
-                    self.enhancer.enhance_file(raw, draft, fx)
-                    enhanced = True
-                except BairdError as exc:
-                    log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
-                    os.replace(raw, draft)
-            metadata = self._probe(draft)
-            with publication, self._lock:
-                out = self._new_path("Clip", ".mp4", f" ({int(round(min(secs, kept)))} s)", folder=folder)
-                os.replace(draft, out)
-                return self._remember(out, origin="clip", enhanced=True if enhanced else None, **metadata, probed=True)
+                if enhance_after:
+                    try:
+                        fx = dict(self.settings["enhance"], hdr=False)  # A clip is shown anywhere: SDR.
+                        self.enhancer.enhance_file(raw, staged, fx)
+                        enhanced = True
+                    except BairdError as exc:
+                        log.warning("enhancing the clip failed, keeping the original: %s", exc.message)
+                        os.replace(raw, staged)
+                info = self._probe(staged)
+                return self._publish_capture(staged, local, "Clip", f" ({int(round(min(secs, kept)))} s)",
+                                             publication=publication, origin="clip", enhanced=True if enhanced else None,
+                                             **info, probed=True)
 
     def enhance_copy(self, name: str, fx: dict[str, Any]) -> dict[str, Any]:
         """Start an enhanced copy of a video next to it (background job, the original stays as it is); returns the job."""

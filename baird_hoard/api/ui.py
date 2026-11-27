@@ -266,9 +266,11 @@ def settings_get(request: Request):
 def settings_put(request: Request, body: dict[str, Any]):
     svc = services(request)
     if svc.monitor_source is not None and {"capture_enabled", "monitor", "monitor_microphone"} & body.keys():
-        if "capture_enabled" in body or not _local_settings_client(request):
-            raise activation_required()
         with svc.sources.lock:
+            if svc.sources.status()["mode"] == "hdmi" and not {"monitor", "monitor_microphone"} & body.keys():
+                return svc.apply_settings(body)
+            if "capture_enabled" in body or not _local_settings_client(request):
+                raise activation_required()
             if "monitor" in body and (body["monitor"] != svc.settings["monitor"] or svc.sources.status()["blocked"]):
                 body = {**body, "capture_enabled": False}
             return svc.apply_settings(body)
@@ -405,7 +407,9 @@ async def live(ws: WebSocket):
             if item is None:
                 break
             if isinstance(item, (bytes, bytearray)):
-                await ws.send_bytes(bytes(item))
+                local = svc.engine.local_source()
+                if local is None or local.producer is not None:
+                    await ws.send_bytes(bytes(item))
             else:
                 await ws.send_json(item)
     except (WebSocketDisconnect, RuntimeError):

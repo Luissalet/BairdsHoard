@@ -23,6 +23,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error(data.error || `HTTP ${res.status}`);
     err.hint = data.hint || '';
+    err.code = data.code || '';
     throw err;
   }
   return data;
@@ -66,6 +67,7 @@ class LivePlayer {
     this.el = el; this.ws = null; this.ms = null; this.sb = null; this.queue = []; this.mime = '';
     this.retry = 1000; this.retryTimer = null;
     this.pageActive = true;
+    this.sourceAvailable = true;
     setInterval(() => this.chase(), 400);
     document.addEventListener('visibilitychange', () => this.sync());
     el.addEventListener('enterpictureinpicture', () => this.sync());
@@ -75,7 +77,7 @@ class LivePlayer {
   }
 
   sync() {
-    if (this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
+    if (this.sourceAvailable && this.pageActive && (!document.hidden || document.pictureInPictureElement === this.el)) {
       this.connect();
       this.chase(true);
     } else {
@@ -86,6 +88,12 @@ class LivePlayer {
       if (ws) ws.close();
       this.teardown();
     }
+  }
+
+  setSourceAvailable(available) {
+    if (this.sourceAvailable === available) return;
+    this.sourceAvailable = available;
+    this.sync();
   }
 
   connect() {
@@ -100,7 +108,11 @@ class LivePlayer {
       if (typeof ev.data === 'string') {
         const msg = JSON.parse(ev.data);
         if (msg.type === 'init') this.setup(msg.mime);
-        else if (msg.type === 'reset') this.teardown();
+        else if (msg.type === 'reset') {
+          this.teardown();
+          const mode = state.status?.source?.mode;
+          if (mode && mode !== 'hdmi') refreshStatus();
+        }
         return;
       }
       this.queue.push(new Uint8Array(ev.data));
@@ -155,6 +167,8 @@ class LivePlayer {
     if (this.ms) {
       try { if (this.ms.readyState === 'open') this.ms.endOfStream(); } catch { /* ignore */ }
       URL.revokeObjectURL(this.el.src);
+      this.el.removeAttribute('src');
+      this.el.load();
       this.ms = null;
     }
   }
@@ -221,6 +235,8 @@ async function refreshStatus() {
   let st;
   try { st = await api('/api/status'); } catch { setChip('error', 'Hoard sin respuesta'); return; }
   state.status = st;
+  const sourceMessage = sourceControls.update(st);
+  player.setSourceAvailable(!st.source || st.source.mode === 'hdmi' || st.source.active);
   const cap = st.capture || {};
   const s = cap.state || 'off';
   const monitor = cap.source === 'monitor';
@@ -245,7 +261,7 @@ async function refreshStatus() {
     ],
     error: [captureText('No se pudo abrir el monitor', 'Could not open the monitor'), ''],
   };
-  const msg = monitor && monitorHints[s] || STATE_HINT[s];
+  const msg = monitor && monitorHints[s] || sourceMessage || STATE_HINT[s];
   $('btn-retry').hidden = !['no_signal', 'no_device', 'stuck', 'error', 'rate_limited'].includes(s);
   $('btn-retry').textContent = s === 'rate_limited' ? 'Apertura extra' : 'Reintentar ahora';
   $('stage-msg').hidden = s === 'running' || !msg;
@@ -860,6 +876,10 @@ async function openSettings() {
     form.capture_enabled.checked = s.capture_enabled;
     settingsLocalCapture = status.source.mode !== 'hdmi';
     if (settingsLocalCapture) await loadCaptureControl();
+    else {
+      settingsCaptureSwitch.disabled = false;
+      $('capture-enabled-label').textContent = captureText('Capturadora activada', 'Capture card enabled');
+    }
     form.capture_always_on.checked = s.capture_always_on;
     for (const k of ['audio_input', 'snapshot_format', 'clip_seconds', 'buffer_seconds', 'light_height', 'light_kbps']) {
       const el = form[k];
