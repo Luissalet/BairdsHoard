@@ -83,6 +83,7 @@ class Config:
     isolated_instance: bool = False
     synthetic_capture: bool = False  # opt in to the marked, device-free test source
     monitor_capture: bool = False    # use the explicitly selected desktop monitor
+    monitor_policy_provider: str | None = None  # Trusted runtime adapter available inside the worker.
 
     @property
     def paths(self) -> AppPaths:
@@ -123,6 +124,7 @@ class Config:
             isolated_instance=isolated_instance,
             synthetic_capture=env_flag("BAIRD_SYNTHETIC_CAPTURE"),
             monitor_capture=env_flag("BAIRD_MONITOR_CAPTURE"),
+            monitor_policy_provider=env_str("BAIRD_MONITOR_POLICY_PROVIDER"),
         )
 
 

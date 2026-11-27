@@ -44,7 +44,9 @@ class Services:
         self._last_state = "off"
         self.monitor_source = None
         if config.monitor_capture and not config.synthetic_capture:
-            self.monitor_source = monitor_source or MonitorSource(self.ffmpeg, config.work_dir)
+            self.monitor_source = monitor_source or MonitorSource(
+                self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider,
+            )
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,

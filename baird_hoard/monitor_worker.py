@@ -17,7 +17,7 @@ from typing import BinaryIO
 
 from .errors import BairdError
 from .monitor_input import AudioGrants, feed_samples
-from .monitor_privacy import AcquisitionGate, BLOCK_CODES, CapturePolicy
+from .monitor_privacy import AcquisitionGate, BLOCK_CODES, CapturePolicy, configured_policy
 from .monitor_source import DesktopMonitor, RESELECT, normalize_selection, selected_monitor, windows_inventory
 from .native import NATIVE_DIR, NO_WINDOW, bind_to_app, csc_path
 from .tsbuf import TsBuffer
@@ -363,6 +363,7 @@ def main(policy: CapturePolicy | None = None, *, frames=None, audio_command=None
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--selection", required=True)
     parser.add_argument("--microphone", action="store_true")
+    parser.add_argument("--policy-provider")
     args = parser.parse_args()
     stop = threading.Event()
     threading.Thread(target=_listen_for_quit, args=(stop,), daemon=True).start()
@@ -373,6 +374,8 @@ def main(policy: CapturePolicy | None = None, *, frames=None, audio_command=None
             return selected_monitor(selected, windows_inventory())
 
         resolve()
+        if policy is None:
+            policy = configured_policy(args.policy_provider)
         gate = AcquisitionGate(policy, selected, on_block=lambda error: emit(
             "error", code=error.code, message=error.message,
         ))

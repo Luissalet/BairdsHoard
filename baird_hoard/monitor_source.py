@@ -82,6 +82,7 @@ class MonitorSource:
     work_dir: Path
     inventory: Callable[[], list[DesktopMonitor]] = windows_inventory
     worker: Callable[[str, dict[str, str], bool, Path], list[str]] = worker_command
+    policy_provider: str | None = None
 
     def list_monitors(self) -> list[dict[str, Any]]:
         monitors = self.inventory()
@@ -97,7 +98,10 @@ class MonitorSource:
         if selection is None:
             raise BairdError("monitor_reselect", "Choose a monitor to start capture.", status=409)
         selected_monitor(selection, self.inventory())
-        return self.worker(self.ffmpeg, selection, settings["monitor_microphone"], self.work_dir)
+        command = self.worker(self.ffmpeg, selection, settings["monitor_microphone"], self.work_dir)
+        if self.policy_provider:
+            command = [*command, "--policy-provider", self.policy_provider]
+        return command
 
     def initial_state(self) -> dict[str, Any]:
         return {"source": "monitor", "device": "", "encoder": "", "audio": False,

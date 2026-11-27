@@ -6,6 +6,7 @@ import threading
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from importlib import import_module
 from typing import Callable, ContextManager, Literal, NoReturn, Protocol, TypeVar
 
 from .errors import BairdError
@@ -35,6 +36,19 @@ class CapturePolicy(Protocol):
         or an expiring positive reply alone cannot provide this contract.
         """
         ...
+
+
+def configured_policy(provider: str | None) -> CapturePolicy | None:
+    """Load the trusted launcher-provided adapter inside the acquisition process."""
+    if not provider:
+        return None
+    module, separator, factory_name = provider.partition(":")
+    if not separator or not module or not factory_name.isidentifier():
+        return None
+    try:
+        return getattr(import_module(module), factory_name)()
+    except Exception:
+        return None  # The gate handles unavailable adapters without granting access.
 
 
 class AcquisitionGate:
