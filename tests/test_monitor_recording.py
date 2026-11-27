@@ -6,9 +6,41 @@ import struct
 import threading
 import time
 
-from baird_hoard.monitor_input import feed_samples
+from baird_hoard.monitor_input import DesktopSampler, feed_samples
 
 from .test_monitor_privacy import HubDouble, MONITOR, guard
+
+
+def test_desktop_shutdown_waits_for_an_admitted_pull_to_settle():
+    admitted, settled, stopped = (threading.Event() for _ in range(3))
+    hub = HubDouble()
+
+    @contextmanager
+    def frames(_):
+        def pull():
+            admitted.set()
+            assert settled.wait(3)
+            return bytes(4)
+        yield pull
+
+    sampler = DesktopSampler(MONITOR, 4, frames, guard(hub), 30, threading.Event())
+    sampler.thread.start()
+
+    def stop():
+        sampler.close()
+        stopped.set()
+
+    closing = threading.Thread(target=stop)
+    try:
+        assert admitted.wait(2)
+        closing.start()
+        assert not stopped.wait(0.65)
+    finally:
+        settled.set()
+        if closing.ident is not None:
+            closing.join(3)
+        sampler.close()
+    assert stopped.is_set() and not sampler.thread.is_alive()
 
 
 def test_static_desktop_does_not_hold_back_timed_pcm():

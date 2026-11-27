@@ -157,6 +157,7 @@ class EncoderAttempt:
         self.video_errors = deque(maxlen=4)
         self.grants = grants
         self.feed_error: Exception | None = None
+        self.feeder: threading.Thread | None = None
         self.levels = grants.levels if grants is not None else {}
         self.readers = [
             threading.Thread(target=self._read, daemon=True),
@@ -209,6 +210,8 @@ class EncoderAttempt:
                 pass  # The worker job closes remaining handles on exit.
         for reader in self.readers:
             reader.join(timeout=0.5)
+        if self.feeder is not None:
+            self.feeder.join()
         self.video.stdout.close()
         self.video.stderr.close()
         self.audio.stderr.close()
@@ -226,9 +229,8 @@ class EncoderAttempt:
             finally:
                 self.audio.stdout.close()
 
-        thread = threading.Thread(target=feed, daemon=True)
-        self.readers.append(thread)
-        thread.start()
+        self.feeder = threading.Thread(target=feed, daemon=True)
+        self.feeder.start()
 
 
 @contextmanager
@@ -275,9 +277,11 @@ def open_guarded_encoder(audio_command, command, monitor, frames, dimensions, ga
         session.start_feeder(monitor, frames, dimensions, gate, microphone)
         yield session
     finally:
-        session.close()
-        for thread in grants.threads:
-            thread.join(timeout=0.5)
+        try:
+            session.close()
+        finally:
+            for thread in grants.threads:
+                thread.join()
 
 
 def _same_output(expected: DesktopMonitor, resolve) -> None:

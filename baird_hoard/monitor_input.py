@@ -56,10 +56,15 @@ class DesktopSampler:
                 return
             with ExitStack() as owned:
                 grab = gate.acquire("video", lambda: owned.enter_context(frames(monitor)))
+                def pull():
+                    if self.stop.is_set() or capture_stopped.is_set():
+                        return None
+                    return grab()
+
                 period = 1 / fps
                 while not (self.stop.is_set() or capture_stopped.is_set()):
                     started = time.monotonic()
-                    picture = gate.acquire("video", grab)
+                    picture = gate.acquire("video", pull)
                     if picture is not None:
                         if len(picture) != frame_bytes:
                             raise ValueError("The desktop frame has an unexpected size.")
@@ -74,7 +79,9 @@ class DesktopSampler:
 
     def close(self):
         self.stop.set()
-        self.thread.join(timeout=0.5)
+        # The producer supervisor still bounds process shutdown. A normal exit
+        # must let an admitted desktop pull settle its durable permission first.
+        self.thread.join()
 
 
 def feed_samples(sink, pcm, monitor, size, frames, gate, stop, fps, channels):
