@@ -387,7 +387,7 @@ async def live(ws: WebSocket):
     """Fragmented MP4 of the live picture: a JSON ``init`` message with the MIME type, then binary init segment and
     fragments. ``{"type":"reset"}`` means a new stream follows (start a new MediaSource). ``?view=raw`` always shows
     the original; otherwise the enhanced picture is shown while the enhancement is on (``/api/status`` says which).
-    ``?view=meter`` keeps an armed local producer available to the status meter without remuxing or sending pictures."""
+    ``?view=meter`` carries current audio levels from an armed local producer without remuxing or sending pictures."""
     await ws.accept()
     svc = ws.app.state.services
     view = ws.query_params.get("view")
@@ -396,11 +396,25 @@ async def live(ws: WebSocket):
             await ws.close(code=1008)
             return
         demand = object()
+        receiver = asyncio.create_task(ws.receive())
         try:
             await run_in_threadpool(svc.engine.set_demand, demand, True, monitor_meter=True)
-            while (await ws.receive())["type"] != "websocket.disconnect":
-                pass
+            previous = None
+            while True:
+                levels = svc.engine.audio_meter()
+                if levels != previous:
+                    await ws.send_json(levels)
+                    previous = levels
+                ready, _ = await asyncio.wait({receiver}, timeout=0.05)
+                if receiver in ready:
+                    if receiver.result()["type"] == "websocket.disconnect":
+                        break
+                    receiver = asyncio.create_task(ws.receive())
+        except (WebSocketDisconnect, RuntimeError):
+            pass
         finally:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
             await run_in_threadpool(svc.engine.set_demand, demand, False, monitor_meter=True)
         return
     enhanced = view != "raw" and svc.stage.enabled()

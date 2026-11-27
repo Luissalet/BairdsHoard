@@ -36,7 +36,7 @@ SILENCE_LIMIT_S = 20.0   # the helper's own watchdog fires at 8 s; this is the b
 EXIT_GRACE_S = 4.0       # time a helper gets to leave after reporting an error
 KILL_GRACE_S = 6.0       # time a killed helper gets to disappear before the device counts as stuck
 IDLE_GRACE_S = 10.0
-AUDIO_LEVEL_MAX_AGE_S = 2.0
+AUDIO_LEVEL_MAX_AGE_S = 0.25
 RETRY_DELAYS_S = (15.0, 60.0, 300.0, 900.0)
 OPEN_LIMIT = 12
 OPEN_WINDOW_S = 3600.0
@@ -281,13 +281,26 @@ class CaptureEngine:
             elif self._restart.is_set() and out["state"] == "running":
                 out.update(state="starting", input=None, kbps=0, since=None)
             if "audio_level" in out:
-                if out["state"] != "running" or self._stop.is_set():
-                    out.update(audio_level=0.0, microphone_level=None)
-                elif time.monotonic() - self._audio_level_at >= AUDIO_LEVEL_MAX_AGE_S:
-                    out.update(audio_level=0.0, microphone_level=0.0 if out.get("microphone_level") is not None else None)
+                out.update(self._meter_values(out["state"]))
         out["buffered_seconds"] = round(self.buffer.seconds_kept(), 1)
         out["age_s"] = round(time.time() - self.buffer.last_data, 1) if self.buffer.last_data else None
         return out
+
+    def audio_meter(self) -> dict[str, Any]:
+        """Read only the current meter values for the local viewer."""
+        with self._lock:
+            state = self.state["state"] if self.source_enabled() and not self._restart.is_set() else "off"
+            return self._meter_values(state)
+
+    def _meter_values(self, state: str) -> dict[str, Any]:
+        local = self._local_source
+        if (state not in ("starting", "running") or self._stop.is_set() or self._privacy_block is not None
+                or (local is not None and local.gate is not None and local.gate.blocked is not None)):
+            return {"audio_level": 0.0, "microphone_level": None}
+        microphone = self.state.get("microphone_level")
+        if time.monotonic() - self._audio_level_at >= AUDIO_LEVEL_MAX_AGE_S:
+            return {"audio_level": 0.0, "microphone_level": 0.0 if microphone is not None else None}
+        return {"audio_level": self.state.get("audio_level", 0.0), "microphone_level": microphone}
 
     def wait_for_picture(self) -> None:
         """Wait for a pending opening, for up to twelve seconds."""
@@ -325,7 +338,7 @@ class CaptureEngine:
 
     # ------------------------------------------------------------------ internals
 
-    def _set(self, *, process=None, level_monotonic: float | None = None, **changes: Any) -> None:
+    def _set(self, *, process=None, level_monotonic: float | None = None, notify: bool = True, **changes: Any) -> None:
         with self._changed:
             if process is not None and (self._proc is not process or self._proc_local is not self._local_source):
                 return
@@ -336,11 +349,17 @@ class CaptureEngine:
             self.state.update(changes)
             snap = dict(self.state)
             self._changed.notify_all()
-        if self.on_state:
+        if notify and self.on_state:
             try:
                 self.on_state(snap)
             except Exception:  # noqa: BLE001 - a listener must not stop capture
                 log.debug("state listener failed", exc_info=True)
+
+    def _receive_levels(self, proc, event: dict[str, Any]) -> None:
+        with self._lock:
+            if self._proc is proc and self._proc_local is self._local_source:
+                self._audio_level_at = event.get("level_monotonic", time.monotonic())
+                self.state.update(audio_level=event["audio_level"], microphone_level=event.get("microphone_level"))
 
     def _kill(self) -> None:
         proc = self._proc
@@ -725,16 +744,17 @@ class CaptureEngine:
                 continue
             kind = evt.get("event")
             if kind == "ready":
-                self._set(process=proc, device=evt.get("device", ""), encoder=evt.get("encoder", ""), input=evt.get("input"),
+                self._set(process=proc, notify=False, device=evt.get("device", ""), encoder=evt.get("encoder", ""), input=evt.get("input"),
                           audio=self.buffer.audio_pid is not None or True)
                 log.info("capture ready: %s", line[:400])
             elif kind == "stats":
-                measured_at = evt.get("level_monotonic", time.monotonic()) if "audio_level" in evt else None
-                self._set(process=proc, level_monotonic=measured_at,
-                          kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None,
-                          **{key: evt[key] for key in ("audio_level", "microphone_level") if key in evt})
+                if "audio_level" in evt:  # Older workers reported the meter with transport stats.
+                    self._receive_levels(proc, evt)
+                self._set(process=proc, notify=False, kbps=int(evt.get("kbps") or 0), audio=self.buffer.audio_pid is not None)
+            elif kind == "levels" and "audio_level" in evt:
+                self._receive_levels(proc, evt)
             elif kind == "signal":
-                self._set(process=proc, input=evt.get("input"))
+                self._set(process=proc, notify=False, input=evt.get("input"))
             elif kind == "error":
                 code = str(evt.get("code", ""))
                 message = str(evt.get("message", ""))[:300]

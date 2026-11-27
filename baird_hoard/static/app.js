@@ -109,6 +109,9 @@ class LivePlayer {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const ws = new WebSocket(`${proto}://${location.host}/api/live?view=meter`);
       this.meterWs = ws;
+      ws.onmessage = (event) => {
+        if (this.meterWs === ws) showMonitorLevels({source: 'monitor', ...JSON.parse(event.data)});
+      };
       ws.onclose = () => { if (this.meterWs === ws) this.meterWs = null; };
     } else if (this.meterWs) {
       this.meterWs.close();
@@ -295,7 +298,7 @@ async function refreshStatus() {
   }
   const live = s === 'running';
   $('btn-shot').disabled = !live;
-  showMonitorLevels(cap);
+  if (player.meterWs?.readyState !== WebSocket.OPEN) showMonitorLevels(cap);
   $('btn-zone').disabled = !live;
   $('btn-clip').disabled = !live;
   $('clip-label').textContent = `Últimos ${st.clip_seconds} s`;
@@ -704,7 +707,7 @@ function showMonitorLevels(capture) {
   $('vu-mic').hidden = !nativeMeter || capture.microphone_level == null;
   if (!nativeMeter) return;
   const draw = (value, fill, label, name) => {
-    const level = capture.state === 'running' ? Number(value) || 0 : 0;
+    const level = Number(value) || 0;
     const db = level > 0 ? Math.round(20 * Math.log10(level)) : -120;
     const percentage = Math.max(0, Math.min(100, (db + 60) * 100 / 60));
     $(fill).style.width = `${percentage}%`;

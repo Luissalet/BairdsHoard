@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,6 +71,26 @@ def test_status_drops_stale_monitor_levels_and_zeros_them_on_stop(tmp_path):
     engine._set(state="idle")
     assert engine.snapshot()["audio_level"] == 0.0
     assert engine.snapshot()["microphone_level"] is None
+
+
+def test_monitor_meter_updates_before_video_without_transport_stats(tmp_path):
+    settings = capture.Settings(tmp_path / "settings.json", isolated_instance=True)
+    settings.update({"capture_enabled": True})
+    source = MonitorSource("double-ffmpeg", tmp_path)
+    changes = []
+    engine = capture.CaptureEngine(settings, capture.TsBuffer(), source=source, demand_only=True, on_state=changes.append)
+    engine._set(state="starting")
+    changes.clear()
+    event = {"event": "levels", "audio_level": 0.1831, "microphone_level": None, "level_monotonic": time.monotonic()}
+    proc = SimpleNamespace(stderr=io.BytesIO(json.dumps(event).encode() + b"\n"))
+    engine._proc = proc
+    engine._read_events(proc)
+    assert engine.snapshot()["state"] == "starting"
+    assert engine.snapshot()["audio_level"] == 0.1831
+    assert engine.audio_meter() == {"audio_level": 0.1831, "microphone_level": None}
+    assert not changes
+    settings.update({"capture_enabled": False})
+    assert engine.audio_meter()["audio_level"] == 0.0
 
 
 def make_small_transport(path, *, microphone, seconds):

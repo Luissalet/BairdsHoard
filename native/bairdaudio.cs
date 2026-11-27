@@ -60,7 +60,7 @@ sealed class CapturedAudio : IDisposable
 {
     const uint Loopback = 0x20000, AutoConvert = 0x80000000, SrcQuality = 0x08000000;
     const uint Silent = 2, TimestampError = 4;
-    const int Rate = 48000;
+    const int Rate = 48000, RetainedSamples = Rate * 10, MeterAge = Rate / 10;
 
     sealed class Packet
     {
@@ -109,14 +109,16 @@ sealed class CapturedAudio : IDisposable
         started = true;
     }
 
-    public void Drain(long epoch, long now, long emitted, AcquisitionPermit permit)
+    public int Drain(long epoch, long now, AcquisitionPermit permit, out long peakTime)
     {
         uint size;
-        while (true)
+        int peak = 0;
+        peakTime = 0;
+        for (int packet = 0; packet < 4; packet++)
         {
             Check(capture.GetNextPacketSize(out size));
             if (size == 0)
-                return;
+                return peak;
             permit.Begin();
             try
             {
@@ -125,7 +127,7 @@ sealed class CapturedAudio : IDisposable
                 ulong position, qpc;
                 Check(capture.GetBuffer(out data, out frames, out flags, out position, out qpc));
                 if (frames == 0)
-                    return;
+                    return peak;
                 try
                 {
                     long beginning = (flags & TimestampError) == 0
@@ -134,11 +136,28 @@ sealed class CapturedAudio : IDisposable
                     if (lastEnd != long.MinValue && Math.Abs(beginning - lastEnd) < 24)
                         beginning = lastEnd;
                     lastEnd = beginning + frames;
-                    if (lastEnd > emitted && (flags & Silent) == 0 && data != IntPtr.Zero)
+                    if ((flags & Silent) == 0 && data != IntPtr.Zero)
                     {
                         var samples = new short[checked((int)frames * 2)];
                         Marshal.Copy(data, samples, 0, samples.Length);
-                        packets.Enqueue(new Packet { Start = beginning, Samples = samples });
+                        long sampled = BairdAudio.Clock100ns();
+                        if (lastEnd > (sampled - epoch) * Rate / 10000000 - MeterAge)
+                        {
+                            int packetPeak = 0;
+                            foreach (short sample in samples)
+                                packetPeak = Math.Max(packetPeak, Math.Abs((int)sample));
+                            if (packetPeak > peak)
+                            {
+                                peak = packetPeak;
+                                peakTime = Math.Min(sampled, epoch + beginning * 10000000 / Rate);
+                            }
+                        }
+                        lock (packets)
+                        {
+                            while (packets.Count != 0 && packets.Peek().End <= now - RetainedSamples)
+                                packets.Dequeue();
+                            packets.Enqueue(new Packet { Start = beginning, Samples = samples });
+                        }
                     }
                 }
                 finally
@@ -151,32 +170,31 @@ sealed class CapturedAudio : IDisposable
                 permit.End();
             }
         }
+        return peak;
     }
 
-    public int Render(short[] output, long from, int frames, int channels, int channel)
+    public void Render(short[] output, long from, int frames, int channels, int channel)
     {
         long end = from + frames;
-        int peak = 0;
-        while (packets.Count != 0)
-        {
-            var packet = packets.Peek();
-            if (packet.Start >= end)
-                break;
-            long first = Math.Max(from, packet.Start);
-            long last = Math.Min(end, packet.End);
-            for (long at = first; at < last; at++)
+        lock (packets)
+            while (packets.Count != 0)
             {
-                int src = (int)(at - packet.Start) * 2;
-                int dst = (int)(at - from) * channels + channel;
-                output[dst] = packet.Samples[src];
-                output[dst + 1] = packet.Samples[src + 1];
-                peak = Math.Max(peak, Math.Max(Math.Abs((int)output[dst]), Math.Abs((int)output[dst + 1])));
+                var packet = packets.Peek();
+                if (packet.Start >= end)
+                    break;
+                long first = Math.Max(from, packet.Start);
+                long last = Math.Min(end, packet.End);
+                for (long at = first; at < last; at++)
+                {
+                    int src = (int)(at - packet.Start) * 2;
+                    int dst = (int)(at - from) * channels + channel;
+                    output[dst] = packet.Samples[src];
+                    output[dst + 1] = packet.Samples[src + 1];
+                }
+                if (packet.End > end)
+                    break;
+                packets.Dequeue();
             }
-            if (packet.End > end)
-                break;
-            packets.Dequeue();
-        }
-        return peak;
     }
 
     public void Dispose()
@@ -222,9 +240,25 @@ sealed class AcquisitionPermit
 static class BairdAudio
 {
     const int Rate = 48000, Block = 480;
-    const int JitterBuffer = Rate / 20;
+    const int JitterBuffer = Rate / 20, ReportInterval = 500000;
 
-    static long Clock100ns()
+    sealed class PcmOutput
+    {
+        public volatile Exception Failure;
+
+        public PcmOutput(CapturedAudio loop, CapturedAudio mic, Stream sink, long epoch)
+        {
+            var writer = new Thread(() =>
+            {
+                try { WritePcm(loop, mic, sink, epoch); }
+                catch (Exception error) { Failure = error; }
+            });
+            writer.IsBackground = true;
+            writer.Start();
+        }
+    }
+
+    internal static long Clock100ns()
     {
         long ticks = Stopwatch.GetTimestamp();
         return (ticks / Stopwatch.Frequency) * 10000000
@@ -236,37 +270,68 @@ static class BairdAudio
         return (value / 32768.0).ToString("0.0000", CultureInfo.InvariantCulture);
     }
 
-    static void Run(CapturedAudio loop, CapturedAudio mic, Stream sink, AcquisitionPermit permit, long epoch)
+    static void WritePcm(CapturedAudio loop, CapturedAudio mic, Stream sink, long epoch)
     {
         int channels = mic == null ? 2 : 4;
         var samples = new short[Block * channels];
         var bytes = new byte[samples.Length * 2];
-        long emitted = 0, lastReport = 0;
-        int peak = 0, micPeak = 0;
+        long emitted = 0;
         while (true)
         {
             long now = (Clock100ns() - epoch) * Rate / 10000000;
-            loop.Drain(epoch, now, emitted, permit);
-            if (mic != null) mic.Drain(epoch, now, emitted, permit);
             while (emitted + Block <= now - JitterBuffer)
             {
                 Array.Clear(samples, 0, samples.Length);
-                peak = Math.Max(peak, loop.Render(samples, emitted, Block, channels, 0));
+                loop.Render(samples, emitted, Block, channels, 0);
                 if (mic != null)
-                    micPeak = Math.Max(micPeak, mic.Render(samples, emitted, Block, channels, 2));
+                    mic.Render(samples, emitted, Block, channels, 2);
                 Buffer.BlockCopy(samples, 0, bytes, 0, bytes.Length);
                 sink.Write(bytes, 0, bytes.Length);
                 emitted += Block;
             }
-            if (emitted - lastReport >= Rate / 4)
+            Thread.Sleep(4);
+        }
+    }
+
+    static void Run(CapturedAudio loop, CapturedAudio mic, Stream sink, AcquisitionPermit permit, long epoch)
+    {
+        var output = new PcmOutput(loop, mic, sink, epoch);
+        long nextReport = epoch;
+        long loopPeakTime = 0, micPeakTime = 0;
+        int peak = 0, micPeak = 0;
+        while (output.Failure == null)
+        {
+            long now = (Clock100ns() - epoch) * Rate / 10000000;
+            long measured;
+            int loopPeak = loop.Drain(epoch, now, permit, out measured);
+            if (loopPeak > peak)
             {
+                peak = loopPeak;
+                loopPeakTime = measured;
+            }
+            if (mic != null)
+            {
+                int voicePeak = mic.Drain(epoch, now, permit, out measured);
+                if (voicePeak > micPeak)
+                {
+                    micPeak = voicePeak;
+                    micPeakTime = measured;
+                }
+            }
+            long timestamp = Clock100ns();
+            if (timestamp >= nextReport)
+            {
+                long levelTime = loopPeakTime != 0 ? loopPeakTime : micPeakTime != 0 ? micPeakTime : timestamp;
                 Console.Error.WriteLine("{\"event\":\"levels\",\"audio_level\":" + Level(peak)
-                    + ",\"microphone_level\":" + (mic == null ? "null" : Level(micPeak)) + "}");
-                lastReport = emitted;
+                    + ",\"microphone_level\":" + (mic == null ? "null" : Level(micPeak))
+                    + ",\"level_monotonic\":" + (levelTime / 10000000.0).ToString("0.0000000", CultureInfo.InvariantCulture) + "}");
+                nextReport = timestamp + ReportInterval;
                 peak = micPeak = 0;
+                loopPeakTime = micPeakTime = 0;
             }
             Thread.Sleep(4);
         }
+        throw output.Failure;
     }
 
     [MTAThread]
@@ -292,8 +357,7 @@ static class BairdAudio
                 if (mic != null) mic.Start();
             }
             finally { permit.End(); }
-            using (var sink = Console.OpenStandardOutput())
-                Run(system, mic, sink, permit, epoch);
+            Run(system, mic, Console.OpenStandardOutput(), permit, epoch);
             return 0;
         }
         catch (IOException) { return 0; }  // The encoder closed the PCM pipe.
