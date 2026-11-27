@@ -10,7 +10,7 @@ from typing import Any
 from . import __version__
 from .capture import CaptureEngine, ffmpeg_path, ffprobe_path
 from .capture_source import SyntheticSource
-from .config import Config, Settings
+from .config import REPO_ROOT, Config, Settings
 from .copilot import Copilot
 from .enhance import EnhanceStage, Enhancer, StageSource
 from .hoard_link import fam_notify, family
@@ -19,6 +19,7 @@ from .hotkeys import HotkeyHelper
 from .live import LiveRemux
 from .media import Library
 from .monitor_source import MonitorSource, normalize_selection, selected_monitor
+from .native import NATIVE_DIR
 from .ocr import OcrIndex, fold
 from .recording_search import RecordingSearch
 from .textmap import TextReader
@@ -47,7 +48,8 @@ class Services:
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=self.monitor_source is not None,
-                                    graceful_stop=self.monitor_source is not None)
+                                    graceful_stop=self.monitor_source is not None,
+                                    source_cwd=REPO_ROOT if self.monitor_source is not None else NATIVE_DIR)
         self.live = LiveRemux(self.engine, self.ffmpeg)
         self.enhancer = Enhancer(self.ffmpeg, self.ffprobe, config.work_dir)
         self.stage = EnhanceStage(self.engine, self.settings, self.enhancer, on_state=self._on_stage)

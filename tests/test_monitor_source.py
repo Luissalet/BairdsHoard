@@ -12,6 +12,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -173,6 +174,45 @@ def wait_until(check, timeout=8):
             return result
         time.sleep(0.02)
     raise AssertionError("expected state did not arrive")
+
+
+def test_monitor_worker_starts_from_checkout_without_package_install(tmp_path, monkeypatch):
+    # The parent sees the selected display. The real child entrypoint sees only a
+    # fake inventory, where the selection has disappeared, and exits before audio.
+    doubles = tmp_path / "doubles"
+    doubles.mkdir()
+    child_cwd = tmp_path / "worker-cwd.txt"
+    (doubles / "sitecustomize.py").write_text(
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from types import ModuleType\n"
+        "\n"
+        "def desktop_inventory():\n"
+        f"    Path({str(child_cwd)!r}).write_text(str(Path.cwd()), encoding='utf-8')\n"
+        "    return []\n"
+        "\n"
+        "module = ModuleType('baird_hoard.monitor_windows')\n"
+        "module.desktop_inventory = desktop_inventory\n"
+        "sys.modules[module.__name__] = module\n",
+        encoding="utf-8",
+    )
+    repo_root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(repo_root)
+    monkeypatch.setenv("PYTHONPATH", str(doubles))
+    monkeypatch.setattr(capture, "ensure_helper", lambda: pytest.fail("unexpected HDMI helper"))
+    source = MonitorSource(str(tmp_path / "unused-ffmpeg"), tmp_path, lambda: [MONITOR])
+    profile = Config(data_dir=tmp_path / "profile", port=PORT, monitor_capture=True,
+                     isolated_instance=True, background=False)
+    svc = Services(profile, monitor_source=source)
+    svc.settings.update({"capture_enabled": True, "monitor": choose(MONITOR, [MONITOR])})
+    try:
+        with svc.engine.request():
+            with pytest.raises(BairdError) as error:
+                svc.engine.wait_for_picture()
+        assert error.value.code == "monitor_reselect", svc.engine.snapshot()
+        assert Path(child_cwd.read_text(encoding="utf-8")) == repo_root
+    finally:
+        svc.stop()
 
 
 def test_services_open_only_on_demand_and_require_a_new_selection(stream, tmp_path, monkeypatch):

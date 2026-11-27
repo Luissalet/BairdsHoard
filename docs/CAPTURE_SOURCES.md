@@ -13,6 +13,8 @@ El ayudante HDMI es el predeterminado y conserva sus límites de apertura, vigil
 
 ## Windows desktop source
 
+The desktop worker starts with the checkout root as its working directory so Python can load the package when Baird runs from source. The HDMI helper starts in `native/`.
+
 The pre-release desktop source is opt-in through the process flag `BAIRD_MONITOR_CAPTURE`. Use `GET /api/monitors` for the current names and physical bounds, and put the returned `selection` in the `monitor` setting. The `monitor_microphone` setting defaults to off. An explicit selection and a capture consumer are required. A layout change stops the stream, clears the buffer and requires a fresh selection. Cloned outputs with ambiguous physical identity are unavailable.
 
 Desktop Duplication uses the adapter and output resolved from the selected display. The encoder tries the hardware path for that adapter when FFmpeg offers it, then uses software if initialization fails before a stream starts. A restarted encoder gets a new transport stream. WASAPI in shared loopback mode reads the default Windows output. An enabled microphone becomes a second stereo AAC track in saved clips and recordings. The viewer plays system audio, and the meters read the captured levels even while playback is muted. [Desktop Duplication](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api) · [WASAPI loopback](https://learn.microsoft.com/en-gb/windows/win32/coreaudio/loopback-recording)
@@ -20,6 +22,8 @@ Desktop Duplication uses the adapter and output resolved from the selected displ
 Pause and resume are available on the recording toolbar and through `record_pause` and `record_resume`. Pausing releases the recorder's demand. Resume starts at the next key frame and stop joins the active spans into one MP4. The paired tools accept the same target name, so a delayed pause or resume cannot change another recording.
 
 ## Fuente de monitor en Windows
+
+El productor de escritorio se inicia en la raíz del repositorio para que Python encuentre el paquete al ejecutar Baird desde el código fuente. El ayudante HDMI se inicia en `native/`.
 
 La fuente de monitor se activa con el ajuste de proceso `BAIRD_MONITOR_CAPTURE`. `GET /api/monitors` devuelve los nombres, tamaños y posiciones, y una selección que se guarda en el ajuste `monitor`. `monitor_microphone` empieza apagado. La captura se abre al pedir imagen o grabar. Si cambia la disposición, se detiene y hay que volver a elegir monitor.
 

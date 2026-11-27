@@ -52,7 +52,8 @@ class _HdmiSource:
 class CaptureEngine:
     def __init__(self, settings: Settings, buffer: TsBuffer, *, ffmpeg: Optional[str] = None, fake: bool = False,
                  on_state: Optional[Callable[[dict[str, Any]], None]] = None, fake_source: str = "",
-                 source: CaptureSource | None = None, demand_only: bool = False, graceful_stop: bool = False):
+                 source: CaptureSource | None = None, demand_only: bool = False, graceful_stop: bool = False,
+                 source_cwd: Path = NATIVE_DIR):
         self.settings = settings
         self.buffer = buffer
         self._alternate_source = source is not None
@@ -63,6 +64,7 @@ class CaptureEngine:
         self._source: CaptureSource = source if source is not None else (
             SyntheticSource(ffmpeg, video=fake_source, marked=False) if fake else _HdmiSource()
         )
+        self._source_cwd = source_cwd
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
@@ -331,7 +333,7 @@ class CaptureEngine:
             else:
                 self.buffer.reset()
                 self._fatal = None
-                proc = subprocess.Popen(cmd, cwd=str(NATIVE_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                proc = subprocess.Popen(cmd, cwd=str(self._source_cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, bufsize=0, creationflags=NO_WINDOW)
                 self._proc = proc
         if limit:
