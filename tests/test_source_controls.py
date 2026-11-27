@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -216,26 +218,71 @@ def test_picture_request_rechecks_policy_even_with_recent_data(rig, monkeypatch,
     assert engine.buffer.latest() == (b"", 0)
 
 
-def test_revoke_during_snapshot_discards_the_decoded_file(rig, monkeypatch, ts_bytes):
+@pytest.mark.parametrize(("kind", "file_prefix", "suffix"), [
+    ("snapshot", "Captura", ".png"),
+    ("clip", "Clip", ".mp4"),
+    ("look", "Captura", ".png"),
+])
+@pytest.mark.parametrize("revoke", [False, True])
+def test_in_flight_media_stays_out_of_library(rig, monkeypatch, ts_bytes, kind, file_prefix, suffix, revoke):
     client, svc, state = rig
     engine = svc.engine
     monkeypatch.setattr(engine, "_start", lambda: None)
+    monkeypatch.setattr("baird_hoard.media._stamp", lambda: "2000-01-01 00.00.00")
+    monkeypatch.setattr(svc.library, "_probe", lambda _: {"duration": 1})
     assert choose(client).status_code == 200
     assert activate(client).json()["active"]
     engine.buffer.feed(ts_bytes)
-    engine._set(state="running")
+    engine._set(state="running", input={"width": 640, "height": 360})
+    existing = svc.library.folder / "published.png"
+    existing.write_bytes(b"previously published")
+    output = svc.library._new_path(file_prefix, suffix, " (1 s)" if kind == "clip" else "")
+    started, release = threading.Event(), threading.Event()
+    staged = []
 
-    outputs = []
-
-    def decode(args, **_):
+    def encode(args, **_):
+        if kind == "look" and args[-1] == "pipe:1":
+            # The model JPEG is still in flight after the PNG has been prepared.
+            started.set()
+            assert release.wait(8)
+            return SimpleNamespace(returncode=0, stdout=b"synthetic jpeg")
         dest = Path(args[-1])
-        dest.write_bytes(b"decoded")
-        outputs.append(dest)
-        state.policy = ScreenPolicy(True, ())
-        return SimpleNamespace(returncode=0)
+        dest.write_bytes(b"pending media")
+        staged.append(dest)
+        if kind != "look":
+            started.set()
+            assert release.wait(8)
+        return SimpleNamespace(returncode=0, stderr=b"")
 
-    monkeypatch.setattr(svc.library, "_run", decode)
-    response = client.post("/api/snapshot")
-    assert response.status_code == 409
-    assert len(outputs) == 1 and not outputs[0].exists()
-    assert engine.buffer.latest() == (b"", 0)
+    monkeypatch.setattr(svc.library, "_run", encode)
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        if kind == "look":
+            saving = worker.submit(call, client, svc, "screen_look", {"save": True})
+        else:
+            payload = {"seconds": 1} if kind == "clip" else {}
+            saving = worker.submit(client.post, "/api/" + kind, json=payload)
+        try:
+            assert started.wait(5)
+            assert staged[0].is_file() and not saving.done()
+            if revoke:
+                state.policy = ScreenPolicy(True, ())
+                assert client.post("/api/record/start").status_code == 409
+                assert client.get("/api/status").json()["source"]["blocked"] == "private"
+            assert {p["name"] for p in client.get("/api/media").json()["items"]} == {existing.name}
+            for name in (output.name, staged[0].name):
+                assert client.get("/api/files/" + quote(name)).status_code == 404
+                assert client.get("/media/" + quote(name)).status_code == 404
+            assert client.get("/api/files/" + existing.name).content == b"previously published"
+        finally:
+            release.set()
+        response = saving.result(timeout=5)
+
+    assert not staged[0].exists()
+    if revoke:
+        assert response.status_code == 409, response.text
+        assert list(svc.library.folder.iterdir()) == [existing]
+    else:
+        assert response.status_code == 200, response.text
+        saved = response.json()["name"]
+        assert client.get("/api/files/" + quote(saved)).content == b"pending media"
+        assert {p["name"] for p in client.get("/api/media").json()["items"]} == {existing.name, saved}

@@ -72,6 +72,7 @@ class CaptureEngine:
         self.on_state = on_state
         self._listeners: list[Listener] = []
         self._lock = threading.RLock()
+        self._privacy_lock = threading.RLock()
         self._proc: Optional[subprocess.Popen] = None
         self._thread: Optional[threading.Thread] = None
         self._changed = threading.Condition(self._lock)
@@ -120,6 +121,16 @@ class CaptureEngine:
         allowed = self.local_source() is None if local is None else self._check_local_policy(local, fresh=True)
         if not allowed:
             raise BairdError("no_signal", "The capture source is no longer available.", state="off")
+
+    @contextmanager
+    def media_publication(self, local: LocalSource | None):
+        """Order a finished file's atomic publication against observed policy changes."""
+        with self._privacy_lock:
+            self.require_local_policy(local)
+            with self._lock:
+                if self._local_source is not local:
+                    raise BairdError("no_signal", "The capture source is no longer available.", state="off")
+                yield
 
     def source_enabled(self) -> bool:
         with self._lock:
@@ -470,20 +481,21 @@ class CaptureEngine:
         return True
 
     def _check_local_policy(self, local: LocalSource, *, fresh: bool) -> bool:
-        if local.check is None:
-            return False
-        if local.check(fresh):
-            with self._changed:
-                if self._local_source is local:
-                    self._local_source = LocalSource()
-                    self.buffer.reset()
-                    self.state.update(state="off", message="Screen capture is off.", device="", input=None,
-                                      kbps=0, since=None, audio=False)
-                    self._restart.set()
-                    self._wake.set()
-                    self._changed.notify_all()
-            return False
-        return self.local_source() is local
+        with self._privacy_lock:
+            if local.check is None or self.local_source() is not local:
+                return False
+            if local.check(fresh):
+                with self._changed:
+                    if self._local_source is local:
+                        self._local_source = LocalSource()
+                        self.buffer.reset()
+                        self.state.update(state="off", message="Screen capture is off.", device="", input=None,
+                                          kbps=0, since=None, audio=False)
+                        self._restart.set()
+                        self._wake.set()
+                        self._changed.notify_all()
+                return False
+            return self.local_source() is local
 
     def _pump(self, proc: subprocess.Popen, box: dict[str, bool], local: LocalSource | None = None) -> None:
         """Read the source's stdout until it closes, feeding the buffer and the listeners."""
