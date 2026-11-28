@@ -807,7 +807,8 @@ $('tabs').addEventListener('click', (e) => {
 
 // ---------------------------------------------------------------- settings
 
-let settingsLocalCapture = false;
+let settingsCaptureRequiresConfirmation = false;
+let settingsCaptureMode = 'hdmi';
 let settingsCapturePending = null;
 const captureControlPath = '/api/settings/capture-control';
 const settingsControls = {
@@ -830,6 +831,8 @@ function showCaptureControl(target, control) {
   const display = control?.display;
   if (field.title) {
     field.label.textContent = captureText(...field.title);
+  } else if (settingsCaptureMode === 'hdmi') {
+    field.label.textContent = captureText('Capturadora activada', 'Capture card enabled');
   } else if (display) {
     const name = `${display.name} (${display.width}×${display.height}, ${display.x}, ${display.y})`;
     field.label.textContent = captureText(`Capturar ${name}`, `Capture ${name}`);
@@ -841,17 +844,19 @@ function showCaptureControl(target, control) {
 }
 
 async function loadSettingsControls(status) {
-  const wasLocal = settingsLocalCapture;
-  settingsLocalCapture = status.source.mode !== 'hdmi';
+  const wasControlled = settingsCaptureRequiresConfirmation;
+  settingsCaptureMode = status.source.mode;
+  settingsCaptureRequiresConfirmation = status.source.requires_confirmation;
   for (const [target, field] of Object.entries(settingsControls)) {
     field.label.lang = captureEnglish ? 'en' : 'es-ES';
-    if (target === 'capture' && !settingsLocalCapture) {
-      if (wasLocal) field.input.checked = status.source.active;
+    if (target === 'capture' && !settingsCaptureRequiresConfirmation) {
+      if (wasControlled) field.input.checked = status.source.active;
       field.input.disabled = false;
       field.control = null;
       field.label.textContent = captureText('Capturadora activada', 'Capture card enabled');
       continue;
     }
+    if (target === 'capture') field.input.checked = status.source.active;
     if (field.title) field.input.checked = Boolean(status.source.local_features?.[target]);
     field.input.disabled = true;
     try { showCaptureControl(target, await api(controlUrl(target), { method: 'POST', body: {} })); }
@@ -883,7 +888,7 @@ async function showCaptureShortcut(operation, label, title) {
 
 for (const [target, field] of Object.entries(settingsControls)) {
   field.input.addEventListener('click', async (event) => {
-    if (target === 'capture' && !settingsLocalCapture) return;
+    if (target === 'capture' && !settingsCaptureRequiresConfirmation) return;
     if (!event.isTrusted || !navigator.userActivation?.isActive || !field.control?.ticket || settingsCapturePending) {
       event.preventDefault();
       return;
@@ -972,7 +977,7 @@ $('settings').addEventListener('close', async () => {
     ocr_auto: f.ocr_auto.checked, hotkeys_enabled: f.hotkeys_enabled.checked,
     hotkey_shot: f.hotkey_shot.value.trim(), hotkey_clip: f.hotkey_clip.value.trim(),
   };
-  if (!settingsLocalCapture) body.capture_enabled = f.capture_enabled.checked;
+  if (!settingsCaptureRequiresConfirmation) body.capture_enabled = f.capture_enabled.checked;
   try { await api('/api/settings', { method: 'PUT', body }); toast('Ajustes guardados.', 'ok'); refreshStatus(); refreshList(true); }
   catch (err) { fail(err); }
 });

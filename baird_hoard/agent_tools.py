@@ -464,7 +464,7 @@ TOOLS: list[Tool] = [
          lambda s, a: {"jobs": s.library.jobs()}),
     Tool("settings_get", _d("Current settings (clip length, memory, folder, screenshot format, audio input)."), Empty,
          ann(read_only=True), lambda s, a: s.settings.get()),
-    Tool("settings_set", _d("Change capture settings. Capture runs on demand unless capture_always_on is enabled."),
+    Tool("settings_set", _d("Change capture preferences. The person turns on physical sources in Baird Settings on this PC."),
          SettingsArgs, ann(idempotent=True), _settings_set),
 ]
 

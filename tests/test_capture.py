@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import time
+from unittest.mock import Mock
 
 import pytest
 
@@ -172,3 +173,20 @@ def test_only_last_consumer_releases_the_helper_after_grace(engine, monkeypatch)
     assert proc.poll() is None
     wait_for(lambda: engine.snapshot()["state"] == "idle" and engine._proc is None)
     assert proc.poll() is not None
+
+
+def test_new_profile_keeps_the_native_helper_off_without_local_confirmation(tmp_path, monkeypatch):
+    helper = Mock(side_effect=AssertionError("The physical helper must not open in this test."))
+    monkeypatch.setattr(capture, "ensure_helper", helper)
+    settings = Settings(tmp_path / "settings.json")
+    assert settings["capture_enabled"] is True
+    eng = CaptureEngine(settings, TsBuffer())
+    try:
+        eng.settings_changed()
+        with eng.request():
+            eng.retry_now(manual=True)
+            assert not eng._run_once()
+            assert eng.snapshot()["state"] == "off"
+            helper.assert_not_called()
+    finally:
+        eng.stop()

@@ -68,6 +68,7 @@ class CaptureEngine:
         self.buffer = buffer
         self._alternate_source = source is not None
         self._uses_hdmi_helper = source is None and not fake
+        self._hdmi_armed = False  # Per-source permission, separate from the persisted card preference.
         self._demand_only = demand_only
         self._graceful_stop = self._uses_hdmi_helper or graceful_stop
         self._needs_selection = False
@@ -155,11 +156,22 @@ class CaptureEngine:
                         raise BairdError("no_signal", "The capture source is no longer available.", state="off")
                     yield
 
+    @property
+    def uses_hdmi_helper(self) -> bool:
+        return self._uses_hdmi_helper
+
+    def set_hdmi_armed(self, armed: bool) -> None:
+        with self._lock:
+            if not self._uses_hdmi_helper or self._local_source is not None:
+                raise ValueError("The HDMI capture card is not selected.")
+            self._hdmi_armed = armed
+            self.settings_changed()
+
     def source_enabled(self) -> bool:
         with self._lock:
             if self._local_source is not None:
                 return self._local_source.producer is not None
-            return self.settings["capture_enabled"]
+            return (not self._uses_hdmi_helper or self._hdmi_armed) and self.settings["capture_enabled"]
 
     def select_local_source(self, producer: CaptureSource | None = None, *,
                             gate: ScreenGate | None = None) -> None:
@@ -178,6 +190,7 @@ class CaptureEngine:
             proc = self._proc if previous is not None and previous is self._proc_local else None
             if previous is not None and previous.gate is not None:
                 previous.gate.block(None)
+            self._hdmi_armed = False
             self._local_source = local
             self._retry_at = self._limit_until = 0.0
             self._retry_step = self._fails = 0
@@ -196,7 +209,7 @@ class CaptureEngine:
     def _wanted(self) -> bool:
         if self._local_source is not None:
             return self._local_source.producer is not None and bool(self._demands or self._meter_demands)
-        return (self.settings["capture_enabled"] and not self._needs_selection and self._privacy_block is None
+        return (self.source_enabled() and not self._needs_selection and self._privacy_block is None
                 and bool(self._demands or (self._meter_demands if self._demand_only
                                           else self.settings["capture_always_on"])))
 
@@ -234,6 +247,8 @@ class CaptureEngine:
 
     def settings_changed(self, reopen: bool = False) -> None:
         with self._lock:
+            if not self.settings["capture_enabled"]:
+                self._hdmi_armed = False
             if reopen:
                 if self._opening or self._proc is not None:
                     self._restart.set()

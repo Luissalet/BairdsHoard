@@ -286,7 +286,8 @@ def _local_settings_client(request: Request) -> bool:
 
 def _require_capture_control(request: Request, target: ControlTarget) -> None:
     svc = services(request)
-    if (not isinstance(svc.sources, ProfileSources) or (target == "capture" and svc.monitor_source is None)
+    if (not isinstance(svc.sources, ProfileSources)
+            or (target == "capture" and svc.monitor_source is None and not svc.engine.uses_hdmi_helper)
             or not _local_settings_client(request)
             or request.headers.get("sec-fetch-site") != "same-origin"
             or request.headers.get("origin") != str(request.base_url).rstrip("/")):

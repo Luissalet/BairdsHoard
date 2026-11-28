@@ -313,6 +313,8 @@ class Services:
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
         if "source_mode" in changes or LOCAL_FEATURES & changes.keys():
             raise activation_required()
+        if self.engine.uses_hdmi_helper and changes.get("capture_enabled"):
+            raise activation_required()
         with self.sources.lock:
             return self._apply_settings(changes)
 

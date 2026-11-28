@@ -71,7 +71,9 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 ## Settings
 
-Capture on/off (off frees the device for other programs), optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
+The physical capture card starts off whenever Baird starts or returns to HDMI. Turn it on in Settings on this PC and confirm the Windows shortcut before watching or recording.
+
+Capture on/off, optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global
 shortcuts on/off and their key combinations (each needs a modifier and must differ). The enhancement has its own block: on/off, clips and recordings from the enhanced picture, one setting per effect and the GPU it runs on (Vulkan and NVENC index, 2 by default). **Displays on this PC** and **Physical overlay** start off and use local Windows confirmation in Settings. The monitor source captures a selected display with system loopback and an optional microphone track. See [capture sources](docs/CAPTURE_SOURCES.md) for selection and activation. The copilot has its own too (`copilot`): whether an assistant may draw over the live picture (the switch is in the Copilot button), the size of the picture it gets when it looks, the minutes after which a session nobody touches ends, and the language Windows reads the screen in.
 

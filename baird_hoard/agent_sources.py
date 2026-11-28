@@ -139,7 +139,7 @@ class PendingCapture:
 
 
 def activation_required() -> BairdError:
-    return BairdError("source_activation_required", "Use the local screen switch in Baird's Settings.", status=403)
+    return BairdError("source_activation_required", "Use the source switch in Baird's Settings on this PC.", status=403)
 
 
 class ProfileSources:
@@ -171,13 +171,14 @@ class ProfileSources:
                             for row in state["monitors"]]
                 codes = {"private": "privacy_blocked", "excluded": "application_excluded",
                          "missing_display": "monitor_reselect"}
-                return {**state, "monitors": displays, "requires_confirmation": True, "local_features": features,
+                confirmation = state["mode"] != "hdmi" or svc.engine.uses_hdmi_helper
+                return {**state, "monitors": displays, "requires_confirmation": confirmation, "local_features": features,
                         "blocked": codes.get(state["blocked"], state["blocked"]),
                         "revision": self._revision}
             settings = svc.settings.get()
             local = svc.monitor_source is not None
             selection = settings["monitor"] if local else None
-            active = settings["capture_enabled"] and (not local or selection is not None)
+            active = svc.engine.source_enabled() and (not local or selection is not None)
             blocked = None
             if local and active:
                 engine = svc.engine.snapshot()
@@ -192,7 +193,8 @@ class ProfileSources:
             mode = ("overlay" if svc.config.overlay_mode else "monitor") if local else "hdmi"
             return {"mode": mode, "modes": [mode], "monitor": selection["id"] if selection else None,
                     "active": bool(active and not blocked), "blocked": blocked, "monitors": monitors,
-                    "revision": self._revision, "requires_confirmation": local, "local_features": features}
+                    "revision": self._revision, "requires_confirmation": local or svc.engine.uses_hdmi_helper,
+                    "local_features": features}
 
     def overlay_monitor(self) -> DesktopMonitor | None:
         """Read the selected physical geometry without taking the source lock.
@@ -214,7 +216,7 @@ class ProfileSources:
             return None
 
     def settings_applied(self, before: dict, after: dict) -> None:
-        if self._services.monitor_source is not None and any(
+        if (self._services.monitor_source is not None or self._services.engine.uses_hdmi_helper) and any(
             before[key] != after[key] for key in ("capture_enabled", "monitor", "monitor_microphone")
         ):
             self.advance_revision()
@@ -233,9 +235,7 @@ class ProfileSources:
                 self.selector.close()
 
     def _armed(self) -> bool:
-        if self.selector is not None:
-            return self._services.engine.source_enabled()
-        return self._services.settings["capture_enabled"]
+        return self._services.engine.source_enabled()
 
     def set_active(self, active: bool) -> dict[str, Any]:
         with self.lock:
@@ -245,8 +245,16 @@ class ProfileSources:
             self.advance_revision()
             return self.status()
 
-    def _set_confirmed(self) -> None:
-        if self.selector is None:
+    def _set_hdmi_capture(self, enabled: bool) -> None:
+        svc = self._services
+        svc.settings.update({"capture_enabled": enabled})
+        svc.engine.set_hdmi_armed(enabled)
+        self.advance_revision()
+
+    def _set_confirmed(self, mode: SourceMode) -> None:
+        if mode == "hdmi":
+            self._set_hdmi_capture(True)
+        elif self.selector is None:
             self._services.apply_settings({"capture_enabled": True})
         else:
             self.selector.set_active(True)
@@ -257,7 +265,10 @@ class ProfileSources:
         with self.lock:
             state = self.status(list_displays=target == "capture")
             shown = None
-            if target == "capture":
+            if target == "capture" and state["mode"] == "hdmi":
+                active = state["active"]
+                editable = state["requires_confirmation"]
+            elif target == "capture":
                 selection = self._services.settings["monitor"]
                 display = next((item for item in state["monitors"] if item["selection"] == selection), None)
                 active = self._armed() if display is not None else False
@@ -290,7 +301,7 @@ class ProfileSources:
         if (grant.mode != state["mode"] or (state["blocked"] and enabled)
                 or grant.monitor != state["monitor"] or grant.active != self._armed()):
             raise activation_required()
-        if enabled:
+        if enabled and grant.mode != "hdmi":
             selected_monitor(svc.settings["monitor"], svc.monitor_source.inventory())
 
     def set_capture(self, *, session: str, ticket: str, enabled: bool, target: ControlTarget = "capture") -> None:
@@ -303,6 +314,8 @@ class ProfileSources:
             if not enabled:
                 if target != "capture":
                     self._services.set_local_feature(target, False)
+                elif grant.mode == "hdmi":
+                    self._set_hdmi_capture(False)
                 elif self.selector is None:
                     self._services.apply_settings({"capture_enabled": False})
                 else:
@@ -329,7 +342,7 @@ class ProfileSources:
                     raise BairdError("source_approval_required", "Confirm with the Windows shortcut shown in Baird.", status=403)
                 self._validate_control(grant, True)
                 if target == "capture":
-                    self._set_confirmed()
+                    self._set_confirmed(grant.mode)
                 else:
                     self._services.set_local_feature(target, True)
         finally:
