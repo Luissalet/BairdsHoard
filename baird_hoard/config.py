@@ -54,9 +54,10 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "snapshot_format": "png",    # png (exact pixels) or jpg (smaller)
     "audio_input": "hdmi",       # hdmi (the sound that comes with the picture) or line (the 3.5 mm input)
     "capture_always_on": False,  # opt in to capture even without viewers, recordings or rules
-    "capture_enabled": True,     # off frees the device for other programs
+    "capture_enabled": True,     # capture card preference; local capture is authorized in memory
     "monitor_capture": False,   # show this PC's display sources after a local opt-in
     "overlay_mode": False,       # allow the physical overlay source
+    "source_mode": None,         # last source selection; None in profiles saved before this field
     "monitor": None,             # stable monitor selection from /api/monitors
     "monitor_microphone": False, # separate microphone track, explicitly enabled
     "light_height": 720,         # "light copy" of a video: height in pixels
@@ -198,6 +199,8 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     data["capture_enabled"] = bool(data["capture_enabled"])
     data["monitor_capture"] = data["monitor_capture"] is True
     data["overlay_mode"] = data["overlay_mode"] is True
+    if data["source_mode"] not in ("hdmi", "monitor", "overlay"):
+        data["source_mode"] = None
     data["monitor"] = normalize_selection(data["monitor"])
     data["monitor_microphone"] = data["monitor_microphone"] is True
     data["capture_always_on"] = data["capture_always_on"] is True

@@ -271,7 +271,9 @@ def settings_put(request: Request, body: dict[str, Any]):
                 return svc.apply_settings(body)
             if "capture_enabled" in body or not _local_settings_client(request):
                 raise activation_required()
-            if "monitor" in body and (body["monitor"] != svc.settings["monitor"] or svc.sources.status()["blocked"]):
+            selector = getattr(svc.sources, "selector", None)
+            if (selector is None and "monitor" in body
+                    and (body["monitor"] != svc.settings["monitor"] or svc.sources.status()["blocked"])):
                 body = {**body, "capture_enabled": False}
         return svc.apply_settings(body)
 

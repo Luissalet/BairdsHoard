@@ -57,13 +57,13 @@ class Services:
         monitor = monitor_source or MonitorSource(self.ffmpeg, config.work_dir, policy_provider=config.monitor_policy_provider)
         monitor_enabled = not config.synthetic_capture and (config.monitor_capture or self.settings["monitor_capture"])
         self.monitor_source = monitor if monitor_enabled else None
-        if monitor_enabled and self.settings["capture_enabled"]:
-            self.settings.update({"capture_enabled": False})
         # An injected producer without an authority can still exercise the fixed profile contract.
         native_selector = not config.synthetic_capture and (
             monitor_source is None or monitor.policy_provider is not None or read_screen_policy is not None
         ) and (monitor_enabled or screen_backend is None)
         fixed_monitor = monitor_enabled and not native_selector
+        if fixed_monitor and self.settings["capture_enabled"]:
+            self.settings.update({"capture_enabled": False})
         source = SyntheticSource(self.ffmpeg) if config.synthetic_capture else self.monitor_source if fixed_monitor else None
         self.engine = CaptureEngine(self.settings, self.buffer, ffmpeg=self.ffmpeg, fake=config.fake, on_state=self._on_state,
                                     fake_source=config.fake_source, source=source, demand_only=fixed_monitor,
@@ -85,7 +85,7 @@ class Services:
 
             def prepare_change(choice: Selection) -> None:
                 binding = {"id": choice.monitor, "layout": choice.layout} if choice.monitor else None
-                self.settings.update({"monitor": binding, "capture_enabled": False})
+                self.settings.update({"source_mode": choice.mode, "monitor": binding})
 
             def make_selector(initial: Selection) -> SourceControls:
                 backend = screen_backend or self._monitor_backend(monitor, read_screen_policy)
@@ -95,10 +95,7 @@ class Services:
 
             self._make_monitor_selector = make_selector
             if monitor_enabled:
-                saved = self.settings["monitor"] or {}
-                overlay = config.overlay_mode or self.settings["overlay_mode"]
-                profile.selector = make_selector(Selection("overlay" if overlay else "monitor",
-                                                           saved.get("id"), saved.get("layout")))
+                profile.selector = make_selector(self._initial_monitor_selection())
         elif screen_backend is not None:
             self.sources = SourceControls(self.engine, recording_state, screen_backend, read_screen_policy,
                                           subscribe_screen_policy)
@@ -131,6 +128,18 @@ class Services:
         # The environment monitor profile retains its original three source modes.
         legacy_overlay = self.config.monitor_capture and self._make_monitor_selector is not None
         return self.monitor_source is not None and (legacy_overlay or self.config.overlay_mode or self.settings["overlay_mode"])
+
+    def _initial_monitor_selection(self) -> Selection:
+        saved = self.settings["monitor"] or {}
+        mode = self.settings["source_mode"]
+        if self.config.monitor_capture:
+            # Explicit environment profiles keep their original startup source for tests.
+            mode = "overlay" if self.config.overlay_mode else "monitor"
+        elif mode == "overlay" and not self._overlay_available():
+            mode = "monitor"
+        elif mode is None:
+            mode = "monitor" if saved else "hdmi"
+        return Selection() if mode == "hdmi" else Selection(mode, saved.get("id"), saved.get("layout"))
 
     def local_features(self) -> dict[str, bool]:
         return {"monitor_capture": self.monitor_source is not None, "overlay_mode": self._overlay_available()}
@@ -289,7 +298,7 @@ class Services:
                 "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
-        if LOCAL_FEATURES & changes.keys():
+        if "source_mode" in changes or LOCAL_FEATURES & changes.keys():
             raise activation_required()
         with self.sources.lock:
             return self._apply_settings(changes)

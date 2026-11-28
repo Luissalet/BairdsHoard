@@ -644,6 +644,7 @@ def test_persistent_local_features_require_a_gesture_and_apply_live(tmp_path, mo
             assert client.put("/api/settings", json={target: True}).status_code == 403
             rejected = agent(client, "settings_set", {target: True})
             assert rejected.status_code == 400 and rejected.json()["code"] == "invalid"
+        assert client.put("/api/settings", json={"source_mode": "overlay"}).status_code == 403
         assert client.post(overlay, headers=headers).json()["ticket"] is None
 
         ticket = client.post(monitor, headers=headers).json()["ticket"]
@@ -683,6 +684,43 @@ def test_persistent_local_features_require_a_gesture_and_apply_live(tmp_path, mo
         assert after["monitors"] == [] and after["local_features"] == initial["local_features"]
         stored = Settings(config.settings_path).get()
         assert not stored["monitor_capture"] and not stored["overlay_mode"]
+
+
+@pytest.mark.parametrize(("mode", "card_enabled"), [
+    ("hdmi", True), ("hdmi", False), ("monitor", True), ("overlay", False),
+])
+def test_selected_source_and_hdmi_preference_survive_restart(tmp_path, mode, card_enabled):
+    def unexpected_device(*args, **kwargs):
+        pytest.fail("the profile opened a capture device without demand")
+
+    def privacy():
+        return ScreenPolicy(False, ())
+
+    config = Config(data_dir=tmp_path, port=PORT, isolated_instance=True, background=False)
+    source = MonitorSource("unused-double", tmp_path, lambda: [MONITOR], unexpected_device)
+    Settings(config.settings_path, isolated_instance=True).update({
+        "monitor_capture": True, "overlay_mode": True, "capture_enabled": card_enabled,
+    })
+    client_options = {"base_url": f"http://127.0.0.1:{PORT}", "client": ("127.0.0.1", 50000)}
+    arguments = {"mode": "hdmi"} if mode == "hdmi" else {**SOURCE, "mode": mode}
+    first = Services(config, monitor_source=source, read_screen_policy=privacy, confirm_capture=confirm_test_shortcut)
+    with TestClient(create_app(config, first), **client_options) as client:
+        assert agent(client, "source_select", arguments).raise_for_status().json()["mode"] == mode
+        if mode != "hdmi":
+            set_local_capture(client, True)
+            assert agent(client, "source_list").json()["active"]
+        assert first.settings["capture_enabled"] is card_enabled
+
+    second = Services(config, monitor_source=source, read_screen_policy=privacy, confirm_capture=confirm_test_shortcut)
+    with TestClient(create_app(config, second), **client_options) as client:
+        state = agent(client, "source_list").json()
+        assert state["mode"] == mode and state["monitor"] == arguments.get("monitor")
+        assert state["active"] is (mode == "hdmi" and card_enabled)
+        assert second.settings["capture_enabled"] is card_enabled
+        assert second.engine._thread is None
+        if mode != "hdmi":
+            denied = agent(client, "screen_look", {"source": arguments, "save": False})
+            assert denied.status_code == 403 and denied.json()["code"] == "source_off"
 
 
 def test_default_hdmi_profile_is_addressable_without_starting_a_helper(tmp_path, monkeypatch):
