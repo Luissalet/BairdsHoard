@@ -142,6 +142,15 @@ class CaptureEngine:
         if not allowed:
             raise BairdError("no_signal", "The capture source is no longer available.", state="off")
 
+    def observe_local_policy(self, gate: ScreenGate) -> BlockReason | None:
+        """Check an armed source even before it has a producer process."""
+        local = self.local_source()
+        if local is not None and local.gate is gate:
+            self._check_local_policy(local)
+            return gate.blocked
+        # The previous producer stays revoked. The authority may now allow a fresh confirmation.
+        return gate.current_block_reason()
+
     @contextmanager
     def media_publication(self, local: LocalSource | None):
         """Order a finished file's atomic publication against observed policy changes."""

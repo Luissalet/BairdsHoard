@@ -26,7 +26,8 @@ from .test_monitor_privacy import HubDouble
 from .test_monitor_source import MONITOR, confirm_test_shortcut, set_local_capture
 
 
-def test_confirmed_private_cut_replaces_temporary_policy_unavailable(monkeypatch, tmp_path):
+@pytest.fixture
+def scoped_monitor(monkeypatch, tmp_path):
     hub = HubDouble()
     authority = ModuleType("monitor_cutoff_test_hub")
     authority.connect = lambda: hub
@@ -39,24 +40,52 @@ def test_confirmed_private_cut_replaces_temporary_policy_unavailable(monkeypatch
     with TestClient(create_app(config, svc), base_url="http://127.0.0.1:17697", client=("127.0.0.1", 50000)) as client:
         svc.sources.select("monitor", MONITOR.id)
         set_local_capture(client, True)
-        local = svc.engine.local_source()
-        read = hub.read
-        monkeypatch.setattr(hub, "read", lambda *_: None)
+        yield client, svc, hub
+
+
+def _look(client, svc):
+    return client.post("/api/agent/call", headers={"Authorization": f"Bearer {svc.token}"},
+                       json={"name": "screen_look", "arguments": {"save": False}})
+
+
+def test_rearm_after_private_cut_without_toggling_displays(scoped_monitor, monkeypatch):
+    client, svc, hub = scoped_monitor
+    local = svc.engine.local_source()
+    with monkeypatch.context() as failure:
+        failure.setattr(hub, "read", lambda *_: None)
         assert not svc.engine._check_local_policy(local)
         assert client.get("/api/status").json()["source"]["blocked"] == "policy_unavailable"
 
-        monkeypatch.setattr(hub, "read", read)
-        hub.change(private=True)
-        source = client.get("/api/status").json()["source"]
-        assert source["blocked"] == "privacy_blocked" and not source["active"]
-        response = client.post("/api/agent/call", headers={"Authorization": f"Bearer {svc.token}"},
-                               json={"name": "screen_look", "arguments": {"save": False}})
-        assert response.status_code == 409 and response.json()["code"] == "privacy_blocked"
-        assert svc.engine.buffer.latest() == (b"", 0)
+    hub.change(private=True)
+    source = client.get("/api/status").json()["source"]
+    assert source["blocked"] == "privacy_blocked" and not source["active"]
+    denied = _look(client, svc)
+    assert denied.status_code == 409 and denied.json()["code"] == "privacy_blocked"
 
-        hub.change(private=False)
+    hub.change(private=False)
+    source = client.get("/api/status").json()["source"]
+    assert source["blocked"] is None and not source["active"]
+    denied = _look(client, svc)
+    assert denied.status_code == 403 and denied.json()["code"] == "source_off"
+    assert svc.engine.buffer.latest() == (b"", 0) and svc.engine._thread is None
+
+    set_local_capture(client, True)
+    assert svc.engine.local_source() is not local
+    assert svc.engine._thread is None
+
+
+@pytest.mark.parametrize("read_status_first", [True, False])
+def test_armed_idle_source_reports_privacy_before_opening(scoped_monitor, read_status_first):
+    client, svc, hub = scoped_monitor
+    assert svc.engine._thread is None and svc.engine.source_enabled()
+    hub.change(private=True)
+    if read_status_first:
         source = client.get("/api/status").json()["source"]
         assert source["blocked"] == "privacy_blocked" and not source["active"]
+
+    denied = _look(client, svc)
+    assert denied.status_code == 409 and denied.json()["code"] == "privacy_blocked"
+    assert svc.engine._thread is None and svc.engine.buffer.latest() == (b"", 0)
 
 
 @pytest.mark.parametrize(("policy_change", "cutoff"), [

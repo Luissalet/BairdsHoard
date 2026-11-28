@@ -360,8 +360,9 @@ class Services:
         return after
 
     def status(self) -> dict[str, Any]:
+        source = self.sources.status()
         cap = self.engine.snapshot()
-        return {"capture": cap, "source": self.sources.status(), "recording": self.library.recorder.status(), "viewers": self.live.viewers,
+        return {"capture": cap, "source": source, "recording": self.library.recorder.status(), "viewers": self.live.viewers,
                 "transcription": self.transcriber.status(), "jobs": self.library.jobs(), "enhance": self.stage.status(), "media_dir": self.settings.media_dir(), "ffmpeg": bool(self.ffmpeg),
                 "clip_seconds": self.settings["clip_seconds"], "version": __version__,
                 "watch": self.watch.summary(), "hotkeys": self.hotkeys.status(self.settings["hotkeys_enabled"]),

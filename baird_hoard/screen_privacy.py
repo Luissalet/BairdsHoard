@@ -100,6 +100,10 @@ class ScreenGate:
             self.block(reason)
         return self.blocked
 
+    def current_block_reason(self) -> BlockReason | None:
+        """Read the authority for status while leaving this producer's cutoff latched."""
+        return self._read_block_reason()
+
     def _read_block_reason(self) -> BlockReason | None:
         try:
             return self._check()
