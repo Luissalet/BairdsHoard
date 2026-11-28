@@ -71,7 +71,7 @@ runs **Start all**. See [device notes](docs/DEVICE.md) for the retry policy.
 
 ## Settings
 
-The physical capture card starts off whenever Baird starts or returns to HDMI. Turn it on in Settings on this PC and confirm the Windows shortcut before watching or recording.
+The physical capture card starts off in new profiles. Turn it on in Settings on this PC and confirm the Windows shortcut. Baird remembers that choice across restarts and preserves capture on startup for existing HDMI-only profiles that had their card enabled. Returning from a display or overlay, or turning off **Displays on this PC**, switches the card off. Use **Capture card off · Turn on** in the source bar to open Settings.
 
 Capture on/off, optional always-on capture, device, audio input (HDMI or the 3.5 mm line in; the API also takes `spdif` or a crossbar input number), screenshot format,
 clip length, memory window (10–600 s), media folder, size and bitrate of light copies, automatic OCR on/off, global

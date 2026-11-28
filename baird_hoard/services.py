@@ -87,7 +87,7 @@ class Services:
 
             def prepare_change(choice: Selection) -> None:
                 binding = {"id": choice.monitor, "layout": choice.layout} if choice.monitor else None
-                self.settings.update({"source_mode": choice.mode, "monitor": binding})
+                self.settings.update({"source_mode": choice.mode, "monitor": binding, "hdmi_armed": False})
 
             def make_selector(monitor: MonitorSource, initial: Selection) -> SourceControls:
                 backend = screen_backend or self._monitor_backend(monitor, read_screen_policy)
@@ -173,7 +173,9 @@ class Services:
                 else:
                     if profile.selector.selection.mode != "hdmi":
                         profile.select("hdmi")
-                    self.settings.update({feature: False, "overlay_mode": False})
+                    self.settings.update({feature: False, "overlay_mode": False, "hdmi_armed": False})
+                    if self.engine.uses_hdmi_helper:
+                        self.engine.set_hdmi_armed(False)
                     profile.selector.close()
                     profile.selector = None
                     self.monitor_source = None
@@ -311,7 +313,7 @@ class Services:
                 "jobs": [j for j in self.library.jobs() if j.get("kind") == "enhance"]}
 
     def apply_settings(self, changes: dict[str, Any]) -> dict[str, Any]:
-        if "source_mode" in changes or LOCAL_FEATURES & changes.keys():
+        if {"source_mode", "hdmi_armed"} & changes.keys() or LOCAL_FEATURES & changes.keys():
             raise activation_required()
         if self.engine.uses_hdmi_helper and changes.get("capture_enabled"):
             raise activation_required()
