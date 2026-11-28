@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -131,6 +132,35 @@ class Library:
 
     # ------------------------------------------------------------------ index
 
+    def _prune_missing(self, folder: Path, present: set[str]) -> None:
+        with self._lock:
+            candidates = self._index.keys() - present
+            if not candidates or folder != Path(self.settings.media_dir()):
+                return
+            remaining = self._index.copy()
+            for name in candidates:
+                if not name or _BAD_NAME.search(name) or name in (".", ".."):
+                    continue
+                try:
+                    # A file can be published after list() enumerates the directory.
+                    if stat.S_ISREG((folder / name).stat().st_mode):
+                        continue
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    continue
+                remaining.pop(name)
+            if len(remaining) == len(self._index):
+                return
+            try:
+                if not folder.is_dir():
+                    return
+                write_json_atomic(self.config.index_path, remaining)
+            except OSError:
+                log.warning("Could not prune missing media metadata", exc_info=True)
+                return
+            self._index = remaining
+
     def _remember(self, path: Path, **meta: Any) -> dict[str, Any]:
         with self._lock:
             entry = dict(self._index.get(path.name, {}))
@@ -181,22 +211,38 @@ class Library:
 
     def list(self, kind: str = "all", limit: int = 200) -> list[dict[str, Any]]:
         folder = self.folder
-        files = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXT | VIDEO_EXT | {".html"}]
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        files = []
+        extensions = IMAGE_EXT | VIDEO_EXT | {".html"}
+        for path in folder.iterdir():
+            if path.suffix.lower() not in extensions:
+                continue
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                files.append((path, info.st_mtime))
+        files.sort(key=lambda item: item[1], reverse=True)
+        present = {path.name for path, _ in files}
         out = []
-        for p in files:
+        for p, _ in files:
             if ((kind == "image" and p.suffix.lower() not in IMAGE_EXT) or
                     (kind == "video" and p.suffix.lower() not in VIDEO_EXT) or
                     (kind == "document" and p.suffix.lower() != ".html")):
                 continue
             if self.recorder.is_writing(p):
                 continue
-            d = self.describe(p)
+            try:
+                d = self.describe(p)
+            except FileNotFoundError:
+                present.discard(p.name)
+                continue
             if kind != "all" and d["kind"] != kind:
                 continue
             out.append(d)
             if len(out) >= limit:
                 break
+        self._prune_missing(folder, present)
         return out
 
     # ------------------------------------------------------------------ thumbnails
@@ -511,10 +557,10 @@ class Library:
         if _BAD_NAME.search(new_name) or new_name.startswith("."):
             raise BairdError("invalid", "The new name has characters Windows does not allow.")
         target = path.with_name(new_name)
-        if target.exists():
-            raise BairdError("conflict", f"There is already a file called {new_name!r}.")
-        path.rename(target)
         with self._lock:
+            if target.exists():
+                raise BairdError("conflict", f"There is already a file called {new_name!r}.")
+            path.rename(target)
             entry = self._index.pop(path.name, None)
             if entry is not None:
                 self._index[target.name] = entry
