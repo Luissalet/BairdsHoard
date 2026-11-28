@@ -918,7 +918,9 @@ function showCaptureControl(target, control) {
   if (field.title) {
     field.label.textContent = captureText(...field.title);
   } else if (settingsCaptureMode === 'hdmi') {
-    field.label.textContent = captureText('Capturadora activada', 'Capture card enabled');
+    field.label.textContent = control?.active === false
+      ? captureText('Capturadora apagada · Encender', 'Capture card off · Turn on')
+      : captureText('Capturadora activada', 'Capture card enabled');
   } else if (display) {
     const name = `${display.name} (${display.width}×${display.height}, ${display.x}, ${display.y})`;
     field.label.textContent = captureText(`Capturar ${name}`, `Capture ${name}`);
