@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-import threading
+from _thread import RLock
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, ContextManager, Literal
@@ -52,14 +52,16 @@ class SourceControls:
                  backend: ScreenBackend | None = None, read_policy: Callable[[], ScreenPolicy] | None = None,
                  subscribe_policy: ScreenPolicySubscription | None = None, *,
                  initial: Selection | None = None,
-                 prepare_change: Callable[[Selection], None] | None = None):
+                 prepare_change: Callable[[Selection], None] | None = None,
+                 overlay_enabled: Callable[[], bool] | None = None, lock: RLock | None = None):
         self._engine = engine
         self._recording_state = recording_state
         self._backend = backend
         self._read_policy = read_policy
         self._subscribe_policy = subscribe_policy
         self._unsubscribe_policy: Callable[[], None] | None = None
-        self.lock = threading.RLock()
+        self.lock = lock if lock is not None else RLock()
+        self._overlay_enabled = overlay_enabled or (lambda: True)
         self._selection = initial or Selection()
         self._prepare_change = prepare_change
         self._revision = 0
@@ -83,7 +85,7 @@ class SourceControls:
                 block = block or "missing_display"
             return {
                 "mode": choice.mode,
-                "modes": ["hdmi", "monitor", "overlay"],
+                "modes": ["hdmi", "monitor", "overlay"] if self._overlay_enabled() else ["hdmi", "monitor"],
                 "monitor": choice.monitor,
                 "active": self._engine.source_enabled() and block is None,
                 "blocked": block,
@@ -93,6 +95,7 @@ class SourceControls:
 
     def select(self, mode: SourceMode, monitor: str | None = None) -> dict[str, Any]:
         with self.lock:
+            self._require_mode(mode)
             previous = self._selection
             display = self._find(monitor) if mode != "hdmi" else None
             if mode != "hdmi" and monitor and display is None:
@@ -109,6 +112,7 @@ class SourceControls:
         with self.lock:
             if self._undo is None or token != self._undo[0]:
                 raise BairdError("conflict", "That source change can no longer be undone.")
+            self._require_mode(self._undo[1].mode)
             self._change(self._undo[1])
             self._undo = None
             return self.status()
@@ -190,6 +194,10 @@ class SourceControls:
     def _check_recording(self) -> None:
         if self._recording_state() in ("recording", "paused", "finishing"):
             raise BairdError("recording_in_progress", "Finish the recording before changing source.", status=409)
+
+    def _require_mode(self, mode: SourceMode) -> None:
+        if mode == "overlay" and not self._overlay_enabled():
+            raise BairdError("capture_unavailable", "Enable the overlay in Baird Settings first.", status=503)
 
     def _change(self, choice: Selection) -> None:
         self._check_recording()

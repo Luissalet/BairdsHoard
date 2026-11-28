@@ -19,6 +19,8 @@ from .monitor_source import DesktopMonitor, selected_monitor
 from .source_controls import SourceControls
 
 SourceMode = Literal["hdmi", "monitor", "overlay"]
+ControlTarget = Literal["capture", "monitor_capture", "overlay_mode"]
+LOCAL_FEATURES = frozenset({"monitor_capture", "overlay_mode"})
 
 
 class SourceArgs(BaseModel):
@@ -121,9 +123,10 @@ class CaptureControl:
     session: str
     revision: int
     mode: SourceMode
-    monitor: str
+    monitor: str | None
     active: bool
     expires: float
+    target: ControlTarget
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,7 @@ class ProfileSources:
     def status(self, *, list_displays: bool = False) -> dict[str, Any]:
         svc = self._services
         with self.lock:
+            features = svc.local_features()
             if self.selector is not None:
                 state = self.selector.status(list_displays=list_displays)
                 displays = [{**row, "x": row["left"], "y": row["top"],
@@ -167,7 +171,7 @@ class ProfileSources:
                             for row in state["monitors"]]
                 codes = {"private": "privacy_blocked", "excluded": "application_excluded",
                          "missing_display": "monitor_reselect"}
-                return {**state, "monitors": displays, "requires_confirmation": True,
+                return {**state, "monitors": displays, "requires_confirmation": True, "local_features": features,
                         "blocked": codes.get(state["blocked"], state["blocked"]),
                         "revision": self._revision}
             settings = svc.settings.get()
@@ -188,7 +192,7 @@ class ProfileSources:
             mode = ("overlay" if svc.config.overlay_mode else "monitor") if local else "hdmi"
             return {"mode": mode, "modes": [mode], "monitor": selection["id"] if selection else None,
                     "active": bool(active and not blocked), "blocked": blocked, "monitors": monitors,
-                    "revision": self._revision, "requires_confirmation": local}
+                    "revision": self._revision, "requires_confirmation": local, "local_features": features}
 
     def overlay_monitor(self) -> DesktopMonitor | None:
         """Read the selected physical geometry without taking the source lock.
@@ -197,14 +201,15 @@ class ProfileSources:
         Source changes also clear copilot state while holding the source lock.
         """
         svc = self._services
-        overlay = self.selector.selection.mode == "overlay" if self.selector is not None else svc.config.overlay_mode
-        if not overlay or svc.monitor_source is None:
+        selector, monitor_source = self.selector, svc.monitor_source
+        overlay = selector.selection.mode == "overlay" if selector is not None else svc.config.overlay_mode
+        if not overlay or monitor_source is None:
             return None
         settings = svc.settings.get()
         if not self._armed() or settings["monitor"] is None:
             return None
         try:
-            return selected_monitor(settings["monitor"], svc.monitor_source.inventory())
+            return selected_monitor(settings["monitor"], monitor_source.inventory())
         except (BairdError, OSError):
             return None
 
@@ -221,8 +226,11 @@ class ProfileSources:
             self._pending_capture.cancelled.set()
 
     def close(self) -> None:
-        if self.selector is not None:
-            self.selector.close()
+        with self.lock:
+            if self._pending_capture is not None:
+                self._pending_capture.cancelled.set()
+            if self.selector is not None:
+                self.selector.close()
 
     def _armed(self) -> bool:
         if self.selector is not None:
@@ -244,45 +252,58 @@ class ProfileSources:
             self.selector.set_active(True)
             self.advance_revision()
 
-    def capture_control(self, session: str) -> dict[str, Any]:
-        """Issue a single-use control for the display shown to the person."""
+    def capture_control(self, session: str, target: ControlTarget = "capture") -> dict[str, Any]:
+        """Issue a single-use control for the setting and display shown to the person."""
         with self.lock:
-            state = self.status(list_displays=True)
-            selection = self._services.settings["monitor"]
-            armed = self._armed()
-            display = next((item for item in state["monitors"] if item["selection"] == selection), None)
-            if display is None:
-                return {"active": False, "display": None, "ticket": None}
-            now = time.monotonic()
-            self._controls = {key: grant for key, grant in self._controls.items() if grant.expires > now}
-            if len(self._controls) >= 64:
-                self._controls.pop(next(iter(self._controls)))
-            ticket = token_urlsafe(32)
-            self._controls[ticket] = CaptureControl(session, self._revision, state["mode"], state["monitor"],
-                                                    armed, now + CONTROL_LIFETIME)
-            shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
-            return {"active": armed, "display": shown, "ticket": ticket}
+            state = self.status(list_displays=target == "capture")
+            shown = None
+            if target == "capture":
+                selection = self._services.settings["monitor"]
+                display = next((item for item in state["monitors"] if item["selection"] == selection), None)
+                active = self._armed() if display is not None else False
+                editable = display is not None
+                if editable:
+                    shown = {key: display[key] for key in ("name", "x", "y", "width", "height")}
+            else:
+                active = state["local_features"][target]
+                editable = self._services.local_feature_editable(target)
+            ticket = None
+            if editable:
+                now = time.monotonic()
+                self._controls = {key: grant for key, grant in self._controls.items() if grant.expires > now}
+                if len(self._controls) >= 64:
+                    self._controls.pop(next(iter(self._controls)))
+                ticket = token_urlsafe(32)
+                self._controls[ticket] = CaptureControl(session, self._revision, state["mode"], state["monitor"],
+                                                        active, now + CONTROL_LIFETIME, target)
+            return {"active": active, "display": shown, "ticket": ticket}
 
     def _validate_control(self, grant: CaptureControl, enabled: bool) -> None:
         svc = self._services
+        if grant.expires <= time.monotonic() or grant.revision != self._revision or grant.active == enabled:
+            raise activation_required()
+        if grant.target != "capture":
+            if not svc.local_feature_editable(grant.target) or grant.active != svc.local_features()[grant.target]:
+                raise activation_required()
+            return
         state = self.status()
-        if (grant.expires <= time.monotonic() or grant.revision != self._revision
-                or grant.mode != state["mode"] or (state["blocked"] and enabled)
-                or grant.monitor != state["monitor"] or grant.active != self._armed()
-                or grant.active == enabled):
+        if (grant.mode != state["mode"] or (state["blocked"] and enabled)
+                or grant.monitor != state["monitor"] or grant.active != self._armed()):
             raise activation_required()
         if enabled:
             selected_monitor(svc.settings["monitor"], svc.monitor_source.inventory())
 
-    def set_capture(self, *, session: str, ticket: str, enabled: bool) -> None:
+    def set_capture(self, *, session: str, ticket: str, enabled: bool, target: ControlTarget = "capture") -> None:
         with self.lock:
             grant = self._controls.get(ticket)
-            if grant is None or grant.session != session:
+            if grant is None or grant.session != session or grant.target != target:
                 raise activation_required()
             del self._controls[ticket]
             self._validate_control(grant, enabled)
             if not enabled:
-                if self.selector is None:
+                if target != "capture":
+                    self._services.set_local_feature(target, False)
+                elif self.selector is None:
                     self._services.apply_settings({"capture_enabled": False})
                 else:
                     self.set_active(False)
@@ -305,9 +326,12 @@ class ProfileSources:
                 approved = False
             with self.lock:
                 if approved is not True or not pending.registered.is_set() or pending.cancelled.is_set():
-                    raise BairdError("source_approval_required", "Confirm the selected screen with the Windows shortcut shown in Baird.", status=403)
+                    raise BairdError("source_approval_required", "Confirm with the Windows shortcut shown in Baird.", status=403)
                 self._validate_control(grant, True)
-                self._set_confirmed()
+                if target == "capture":
+                    self._set_confirmed()
+                else:
+                    self._services.set_local_feature(target, True)
         finally:
             with self.lock:
                 self._pending_capture = None
