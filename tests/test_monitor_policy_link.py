@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -164,3 +164,25 @@ def test_unavailable_policy_provider_grants_no_authority(provider, monkeypatch):
     module.rejected = rejected
     monkeypatch.setitem(sys.modules, module.__name__, module)
     assert configured_policy(provider) is None
+
+
+def test_installed_binding_prepares_only_after_the_person_confirms(monkeypatch, tmp_path):
+    hub = HubDouble()
+    scopes = []
+    binding = SimpleNamespace(database=tmp_path / "talos.sqlite3", provider_file=tmp_path / "capture_policy.py",
+                              authority=lambda: hub, prepare=lambda *scope: scopes.append(scope))
+    monkeypatch.setattr("baird_hoard.services.configured_binding", lambda _: binding)
+    monkeypatch.setattr(monitor_windows, "desktop_inventory", lambda: [MONITOR])
+    config = Config(data_dir=tmp_path, port=17697, data_dir_configured=True, monitor_capture=True,
+                    isolated_instance=True, background=False)
+    svc = Services(config, confirm_capture=confirm_test_shortcut)
+    with TestClient(create_app(config, svc), base_url="http://127.0.0.1:17697", client=("127.0.0.1", 50000)) as client:
+        svc.sources.select("monitor", MONITOR.id)
+        assert not client.get("/api/status").json()["source"]["active"]
+        assert scopes == [] and svc.engine._proc is None
+        set_local_capture(client, True)
+        selection = svc.settings["monitor"]
+        assert scopes == [(selection["id"], selection["layout"])]
+        command = svc.engine.local_source().producer.command(svc.settings)
+        assert command[-4:] == ["--policy-database", str(binding.database), "--policy-module", str(binding.provider_file)]
+        assert svc.engine._proc is None

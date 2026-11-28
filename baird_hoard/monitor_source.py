@@ -15,6 +15,7 @@ from .errors import BairdError
 
 if TYPE_CHECKING:
     from .config import Settings
+    from .production_policy import Binding
 
 RESELECT = "Choose a monitor again. Its identity or the desktop layout has changed."
 
@@ -83,6 +84,7 @@ class MonitorSource:
     inventory: Callable[[], list[DesktopMonitor]] = windows_inventory
     worker: Callable[[str, dict[str, str], bool, Path], list[str]] = worker_command
     policy_provider: str | None = None
+    production_policy: Binding | None = None
 
     def list_monitors(self) -> list[dict[str, Any]]:
         monitors = self.inventory()
@@ -104,6 +106,9 @@ class MonitorSource:
         command = self.worker(self.ffmpeg, selection, settings["monitor_microphone"], self.work_dir)
         if self.policy_provider:
             command = [*command, "--policy-provider", self.policy_provider]
+        elif self.production_policy is not None:
+            binding = self.production_policy
+            command = [*command, "--policy-database", str(binding.database), "--policy-module", str(binding.provider_file)]
         return command
 
     def initial_state(self) -> dict[str, Any]:
