@@ -150,11 +150,10 @@ class Settings:
             data.update(capture_enabled=False, hotkeys_enabled=False)
         if isinstance(raw, dict):
             data.update({k: v for k, v in raw.items() if k in DEFAULT_SETTINGS})
-            # Legacy HDMI profiles had only the capture preference. A saved source
-            # selection or display settings rule out an automatic grant.
+            # A legacy profile without a source selection or display binding
+            # still uses HDMI, even if display sources are available.
             if ("hdmi_armed" not in raw and raw.get("capture_enabled") is True
-                    and raw.get("source_mode") is None and raw.get("monitor") is None
-                    and not raw.get("monitor_capture") and not raw.get("overlay_mode")):
+                    and raw.get("source_mode") is None and raw.get("monitor") is None):
                 data["hdmi_armed"] = True
         return normalize(data)
 

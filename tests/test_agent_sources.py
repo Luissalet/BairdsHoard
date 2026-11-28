@@ -21,7 +21,7 @@ from baird_hoard.agent_sources import SourceArgs, call_on_source
 from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
 from baird_hoard.main import create_app
-from baird_hoard.monitor_source import MonitorSource
+from baird_hoard.monitor_source import MonitorSource, layout_id
 from baird_hoard.screen_privacy import ScreenPolicy
 from baird_hoard.services import Services
 
@@ -804,8 +804,8 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
     helper.assert_called_once()
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_hdmi_authorization_survives_normal_startup(tmp_path, monkeypatch, legacy):
+@pytest.mark.parametrize("profile_type", ["confirmed", "legacy", "legacy_displays_available"])
+def test_hdmi_authorization_survives_normal_startup(tmp_path, monkeypatch, profile_type):
     opened = threading.Event()
 
     def helper_double():
@@ -815,18 +815,25 @@ def test_hdmi_authorization_survives_normal_startup(tmp_path, monkeypatch, legac
     monkeypatch.setattr(capture, "ensure_helper", helper_double)
     config = Config(data_dir=tmp_path, port=PORT, isolated_instance=True, background=False)
     client_options = {"base_url": f"http://127.0.0.1:{PORT}", "client": ("127.0.0.1", 50000)}
-    if legacy:
+    source = MonitorSource("unused-double", tmp_path, lambda: [MONITOR])
+
+    def make_service():
+        return Services(config, monitor_source=source, read_screen_policy=lambda: ScreenPolicy(False, ()),
+                        confirm_capture=confirm_test_shortcut)
+
+    if profile_type != "confirmed":
         config.settings_path.write_text(json.dumps({
             "capture_enabled": True, "device": "C835", "audio_input": "hdmi", "capture_always_on": False,
+            "monitor_capture": profile_type == "legacy_displays_available",
         }), encoding="utf-8")
     else:
-        svc = Services(config, confirm_capture=confirm_test_shortcut)
+        svc = make_service()
         with TestClient(create_app(config, svc), **client_options) as client:
             set_local_capture(client, True)
             assert svc.settings["hdmi_armed"] is True
             assert not opened.is_set()
 
-    svc = Services(config)
+    svc = make_service()
     with TestClient(create_app(config, svc), **client_options) as client:
         assert agent(client, "source_list").json()["active"]
         assert not opened.is_set()
@@ -834,12 +841,13 @@ def test_hdmi_authorization_survives_normal_startup(tmp_path, monkeypatch, legac
         assert opened.wait(3)
         client.put("/api/settings", json={"capture_enabled": False}).raise_for_status()
         assert not agent(client, "source_list").json()["active"]
-    assert not Services(config).engine.source_enabled()
+    assert not make_service().engine.source_enabled()
 
 
 @pytest.mark.parametrize("saved", [
     {}, {"capture_enabled": False}, {"capture_enabled": True, "source_mode": "hdmi"},
-    {"capture_enabled": True, "monitor_capture": True}, {"capture_enabled": True, "hdmi_armed": False},
+    {"capture_enabled": True, "source_mode": "monitor"}, {"capture_enabled": True, "hdmi_armed": False},
+    {"capture_enabled": True, "monitor": {"id": MONITOR.id, "layout": layout_id([MONITOR])}},
 ])
 def test_hdmi_migration_requires_saved_preference_without_display_history(tmp_path, saved):
     path = tmp_path / "settings.json"
