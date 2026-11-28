@@ -88,6 +88,7 @@ class Config:
     monitor_capture: bool = False    # keep the desktop source enabled in a test profile
     overlay_mode: bool = False        # select the overlay source in a monitor test profile
     monitor_policy_provider: str | None = None  # Trusted runtime adapter available inside the worker.
+    talos_url: str = field(default_factory=lambda: env_str("BAIRD_TALOS_URL") or "http://127.0.0.1:5220")
 
     @property
     def paths(self) -> AppPaths:

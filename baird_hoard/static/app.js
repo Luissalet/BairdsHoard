@@ -810,6 +810,92 @@ $('tabs').addEventListener('click', (e) => {
 let settingsCaptureRequiresConfirmation = false;
 let settingsCaptureMode = 'hdmi';
 let settingsCapturePending = null;
+const screenPrivacyPath = '/api/settings/screen-privacy';
+const chooseScreenPrivacy = $('choose-screen-privacy');
+const screenPrivacyChoices = $('screen-privacy-choices');
+const screenPrivacyPrivate = $('screen-privacy-private');
+const screenPrivacyPublic = $('screen-privacy-public');
+let screenPrivacyUpdate = null;
+const screenPrivacyReasons = {
+  privacy_not_chosen: ['Elige la privacidad en Talos antes de capturar una pantalla.',
+    'Choose privacy in Talos before capturing a display.'],
+  privacy_blocked: ['El modo privado de Talos impide la captura de pantalla.',
+    'Talos private mode blocks display capture.'],
+  policy_unbound: ['Vincula la autoridad de Pantalla de Talos a este perfil para capturar.',
+    'Bind this profile to Talos Screen before capturing.'],
+  application_excluded: ['Una exclusión activa de Talos bloquea la captura de pantalla.',
+    'An active Talos exclusion blocks display capture.'],
+  policy_unavailable: ['Baird no puede comprobar los permisos de captura en Talos.',
+    'Baird cannot verify capture permission in Talos.'],
+  screen_privacy_unavailable: ['No se puede consultar la privacidad de pantalla en Talos.',
+    'Talos screen privacy could not be read.'],
+  screen_privacy_save_blocked: ['Talos todavía no ha guardado el cambio. Espera a que termine la captura en curso.',
+    'Talos has not saved the change yet. Wait for the current capture operation to finish.'],
+  local_settings_required: ['Abre Ajustes de Baird en este mismo PC.',
+    'Open Baird Settings on this PC.'],
+};
+
+function showScreenPrivacyReason(code) {
+  const reason = $('screen-privacy-reason');
+  reason.textContent = code ? captureText(...(screenPrivacyReasons[code] || screenPrivacyReasons.screen_privacy_unavailable)) : '';
+  reason.hidden = !code;
+}
+
+function showScreenPrivacy(value, code = value?.reason) {
+  let choice = captureText('no disponible', 'unavailable');
+  if (value) {
+    choice = !value.configured ? captureText('sin elegir', 'not set')
+      : value.private ? captureText('privada', 'private') : captureText('no privada', 'not private');
+  }
+  $('screen-privacy-status').textContent = captureText(`Privacidad de pantalla: ${choice}`, `Screen privacy: ${choice}`);
+  showScreenPrivacyReason(code);
+  chooseScreenPrivacy.disabled = !value;
+}
+
+function openScreenPrivacyChoices(open) {
+  screenPrivacyChoices.hidden = !open;
+  chooseScreenPrivacy.setAttribute('aria-expanded', String(open));
+}
+
+async function loadScreenPrivacy() {
+  $('screen-privacy-settings').lang = captureEnglish ? 'en' : 'es-ES';
+  $('screen-privacy-status').textContent = captureText('Consultando la privacidad de pantalla…', 'Checking screen privacy…');
+  chooseScreenPrivacy.textContent = captureText('Elegir privacidad', 'Choose privacy');
+  chooseScreenPrivacy.disabled = true;
+  screenPrivacyPrivate.textContent = captureText('Guardar como privada', 'Save as private');
+  screenPrivacyPublic.textContent = captureText('Guardar como no privada', 'Save as not private');
+  showScreenPrivacyReason(null);
+  openScreenPrivacyChoices(false);
+  if (screenPrivacyUpdate) await screenPrivacyUpdate.catch(() => {});
+  try { showScreenPrivacy(await api(screenPrivacyPath)); }
+  catch (error) { showScreenPrivacy(null, error.code || 'screen_privacy_unavailable'); }
+}
+
+chooseScreenPrivacy.addEventListener('click', () => {
+  openScreenPrivacyChoices(screenPrivacyChoices.hidden);
+});
+
+for (const [button, privateMode] of [[screenPrivacyPrivate, true], [screenPrivacyPublic, false]]) {
+  button.addEventListener('click', async (event) => {
+    if (!event.isTrusted || !navigator.userActivation?.isActive || screenPrivacyUpdate) return;
+    chooseScreenPrivacy.disabled = screenPrivacyPrivate.disabled = screenPrivacyPublic.disabled = true;
+    screenPrivacyUpdate = api(screenPrivacyPath, { method: 'POST', body: { private: privateMode } });
+    try {
+      const value = await screenPrivacyUpdate;
+      showScreenPrivacy(value);
+      openScreenPrivacyChoices(false);
+      chooseScreenPrivacy.focus();
+      refreshStatus();
+    } catch (error) {
+      showScreenPrivacyReason(error.code || 'screen_privacy_unavailable');
+      chooseScreenPrivacy.disabled = false;
+    } finally {
+      screenPrivacyUpdate = null;
+      screenPrivacyPrivate.disabled = screenPrivacyPublic.disabled = false;
+    }
+  });
+}
+
 const captureControlPath = '/api/settings/capture-control';
 const settingsControls = {
   capture: { input: $('settings-form').capture_enabled, label: $('capture-enabled-label') },
@@ -943,6 +1029,7 @@ async function openSettings() {
     form.hotkey_clip.value = s.hotkey_clip || '';
     api('/api/hotkeys').then(describeHotkeys).catch(() => {});
   } catch (err) { fail(err); return; }
+  loadScreenPrivacy();
   $('settings').showModal();
 }
 

@@ -8,8 +8,9 @@ import base64
 import time
 from secrets import token_urlsafe
 from typing import Any, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
+import httpx
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
@@ -21,6 +22,7 @@ from ..document_review import original_view
 from ..errors import BairdError
 from ..hoard_link import family
 from ..native import list_devices
+from ..production_policy import CONFIG_NAME as POLICY_CONFIG_NAME
 from .deps import services, tool
 
 router = APIRouter()
@@ -284,13 +286,76 @@ def _local_settings_client(request: Request) -> bool:
             and request.url.hostname in ("localhost", "127.0.0.1", "::1"))
 
 
+def _same_origin_settings_client(request: Request) -> bool:
+    return (_local_settings_client(request) and request.headers.get("sec-fetch-site") == "same-origin"
+            and request.headers.get("origin") == str(request.base_url).rstrip("/"))
+
+
+class ScreenPrivacyChoice(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    private: StrictBool
+
+
+def _talos_screen_privacy(request: Request, choice: ScreenPrivacyChoice | None = None) -> JSONResponse:
+    svc = services(request)
+    origin = svc.config.talos_url.rstrip("/")
+    unavailable = BairdError("screen_privacy_unavailable", "Talos screen privacy is unavailable.", status=503)
+    try:
+        url = urlsplit(origin)
+        if (url.scheme != "http" or url.hostname not in ("127.0.0.1", "::1", "localhost")
+                or url.username is not None or url.path or url.query or url.fragment):
+            raise unavailable
+        target = origin + "/screen/api/private"
+        if choice is None:
+            response = httpx.get(target, timeout=2, trust_env=False)
+        else:
+            response = httpx.post(target, json=choice.model_dump(), timeout=2, trust_env=False,
+                                  headers={"Origin": origin, "Sec-Fetch-Site": "same-origin"})
+            if response.status_code == 409:
+                raise BairdError("screen_privacy_save_blocked", "Talos could not save the privacy choice yet.",
+                                 status=409)
+        value = response.raise_for_status().json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise unavailable from exc
+
+    if (not isinstance(value, dict) or type(value.get("private")) is not bool
+            or type(value.get("configured")) is not bool):
+        raise unavailable
+    private, configured = value["private"], value["configured"]
+    if choice is not None and (value.get("ok") is not True or not configured or private != choice.private):
+        raise unavailable
+    if not configured:
+        reason = "privacy_not_chosen"
+    elif private:
+        reason = "privacy_blocked"
+    elif not (svc.config.monitor_policy_provider or (svc.config.data_dir / POLICY_CONFIG_NAME).is_file()):
+        reason = "policy_unbound"
+    else:
+        blocked = svc.sources.status()["blocked"]
+        reason = blocked if blocked in ("application_excluded", "policy_unavailable") else None
+    return JSONResponse({"private": private, "configured": configured, "reason": reason},
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.get("/api/settings/screen-privacy")
+def screen_privacy_get(request: Request):
+    if not _local_settings_client(request):
+        raise BairdError("local_settings_required", "Open Baird Settings on this PC.", status=403)
+    return _talos_screen_privacy(request)
+
+
+@router.post("/api/settings/screen-privacy")
+def screen_privacy_save(request: Request, choice: ScreenPrivacyChoice):
+    if not _same_origin_settings_client(request):
+        raise BairdError("local_settings_required", "Open Baird Settings on this PC.", status=403)
+    return _talos_screen_privacy(request, choice)
+
+
 def _require_capture_control(request: Request, target: ControlTarget) -> None:
     svc = services(request)
     if (not isinstance(svc.sources, ProfileSources)
             or (target == "capture" and svc.monitor_source is None and not svc.engine.uses_hdmi_helper)
-            or not _local_settings_client(request)
-            or request.headers.get("sec-fetch-site") != "same-origin"
-            or request.headers.get("origin") != str(request.base_url).rstrip("/")):
+            or not _same_origin_settings_client(request)):
         raise activation_required()
 
 
