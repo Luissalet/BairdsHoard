@@ -68,7 +68,7 @@ class CaptureEngine:
         self.buffer = buffer
         self._alternate_source = source is not None
         self._uses_hdmi_helper = source is None and not fake
-        self._hdmi_armed = False  # Per-source permission, separate from the persisted card preference.
+        self._hdmi_armed = self._uses_hdmi_helper and settings["hdmi_armed"]
         self._demand_only = demand_only
         self._graceful_stop = self._uses_hdmi_helper or graceful_stop
         self._needs_selection = False

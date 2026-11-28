@@ -247,7 +247,7 @@ class ProfileSources:
 
     def _set_hdmi_capture(self, enabled: bool) -> None:
         svc = self._services
-        svc.settings.update({"capture_enabled": enabled})
+        svc.settings.update({"capture_enabled": enabled, "hdmi_armed": enabled})
         svc.engine.set_hdmi_armed(enabled)
         self.advance_revision()
 

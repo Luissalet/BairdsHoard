@@ -9,6 +9,7 @@ const sourceControls = (() => {
     source: 'Source', hdmi: 'Capture card', monitor: 'Other display', overlay: 'Overlay',
     display: 'Display', choose: 'Choose a display', noDisplays: 'No displays available',
     settings: 'Confirm in settings',
+    cardOff: 'Capture card off', armCard: 'Turn on',
     enable: 'Start viewing', disable: 'Turn off', off: 'Capture off', looking: 'Viewing',
     startHint: 'Use Start viewing to show this display.', connecting: 'Starting capture…', waiting: 'Waiting for a picture', saving: 'Saving recording…',
     recording: 'Recording', paused: 'Recording paused', idle: 'On standby',
@@ -22,6 +23,7 @@ const sourceControls = (() => {
     source: 'Fuente', hdmi: 'Capturadora', monitor: 'Otra pantalla', overlay: 'Overlay',
     display: 'Pantalla', choose: 'Elige una pantalla', noDisplays: 'No hay pantallas disponibles',
     settings: 'Confirmar en ajustes',
+    cardOff: 'Capturadora apagada', armCard: 'Encender',
     enable: 'Empezar a mirar', disable: 'Apagar', off: 'Captura apagada', looking: 'Mirando',
     startHint: 'Pulsa Empezar a mirar para ver esta pantalla.', connecting: 'Iniciando captura…', waiting: 'Esperando imagen', saving: 'Guardando grabación…',
     recording: 'Grabando', paused: 'Grabación en pausa', idle: 'En espera',
@@ -54,6 +56,7 @@ const sourceControls = (() => {
     status = st;
     const {source, capture, recording} = st;
     const local = source.mode !== 'hdmi';
+    const cardOff = !local && source.requires_confirmation && !source.active;
     const recordState = recording.state;
     const recordingActive = ['recording', 'paused', 'finishing'].includes(recordState);
     const monitors = source.monitors || [];
@@ -67,7 +70,7 @@ const sourceControls = (() => {
       displayKey = nextDisplayKey;
     }
     const live = capture.state === 'running';
-    const activity = source.blocked || (recordState === 'recording' ? 'recording' :
+    const activity = cardOff ? 'cardOff' : source.blocked || (recordState === 'recording' ? 'recording' :
       recordState === 'paused' ? 'paused' : recordState === 'finishing' ? 'saving' :
       live ? 'looking' : !source.active ? 'off' :
       capture.state === 'starting' ? 'connecting' : capture.state === 'idle' ? 'idle' : 'waiting');
@@ -83,10 +86,11 @@ const sourceControls = (() => {
     display.value = needsSelection ? '' : source.monitor || '';
     display.hidden = !local;
     display.disabled = busy || recordingActive || !monitors.length;
-    toggle.hidden = !local;
-    toggle.textContent = source.requires_confirmation ? text.settings : source.active ? text.disable : text.enable;
+    toggle.hidden = !local && !cardOff;
+    toggle.textContent = cardOff ? text.armCard :
+      source.requires_confirmation ? text.settings : source.active ? text.disable : text.enable;
     const chosenDisplay = !needsSelection && monitors.some(item => item.id === source.monitor);
-    toggle.disabled = busy || (!source.active && (!chosenDisplay || recordingActive));
+    toggle.disabled = busy || (local && !source.active && (!chosenDisplay || recordingActive));
     bar.hidden = false;
     if (local) return [message, !chosenDisplay ? text.choose : activity === 'off' ?
       (source.requires_confirmation ? text.settings : text.startHint) : ''];

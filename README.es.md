@@ -59,6 +59,8 @@ La captura se abre bajo demanda: un directo visible, una grabación, una regla d
 
 ## Ajustes
 
+La capturadora física empieza apagada en perfiles nuevos. Actívala en Ajustes desde este PC y confirma el atajo de Windows. Baird recuerda esa elección al reiniciar y conserva el arranque habitual para los perfiles anteriores que usaban HDMI con la capturadora activada. Volver desde otra pantalla u overlay, o apagar **Pantallas de este PC**, apaga la capturadora. Pulsa **Capturadora apagada · Encender** en la barra de fuentes para abrir Ajustes.
+
 La fuente de monitor de Windows es opcional. Captura la pantalla elegida con sonido del sistema en bucle y una pista de micrófono si se activa. El [contrato de fuentes](docs/CAPTURE_SOURCES.md) explica el ajuste de proceso y la API de selección.
 
 Captura activada o no (desactivada libera la capturadora para otros programas), captura siempre activa opcional, dispositivo, entrada de audio (HDMI o línea), formato de captura, duración del clip, ventana de memoria (10–600 s), carpeta de medios, tamaño y bitrate de las copias ligeras, OCR automático, atajos globales y su combinación (con un modificador y distintas entre sí). El copilot tiene su bloque (`copilot`): si un asistente puede dibujar sobre el directo (el interruptor está en el botón Copilot), el tamaño de la imagen que recibe al mirar, los minutos tras los que se cierra una sesión que nadie toca y el idioma en que Windows lee la pantalla.

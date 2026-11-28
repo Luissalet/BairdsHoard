@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -20,7 +21,7 @@ from baird_hoard.agent_sources import SourceArgs, call_on_source
 from baird_hoard.config import Config, Settings
 from baird_hoard.errors import BairdError
 from baird_hoard.main import create_app
-from baird_hoard.monitor_source import MonitorSource
+from baird_hoard.monitor_source import MonitorSource, layout_id
 from baird_hoard.screen_privacy import ScreenPolicy
 from baird_hoard.services import Services
 
@@ -723,9 +724,11 @@ def test_selected_source_and_hdmi_preference_survive_restart(tmp_path, mode, car
             assert denied.status_code == 403 and denied.json()["code"] == "source_off"
 
 
-@pytest.mark.parametrize(("always_on", "viewer_open"), [(False, True), (True, False)])
+@pytest.mark.parametrize(("always_on", "return_from"), [
+    (False, "monitor"), (True, "overlay"), (True, "disable_selected"), (False, "disable_from_hdmi"),
+])
 def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
-        tmp_path, monkeypatch, always_on, viewer_open):
+        tmp_path, monkeypatch, always_on, return_from):
     helper_called = threading.Event()
 
     def closed_loop_helper():
@@ -737,7 +740,7 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
     config = Config(data_dir=tmp_path, port=PORT, isolated_instance=True, background=False)
     source = MonitorSource("unused-double", tmp_path, lambda: [MONITOR])
     Settings(config.settings_path, isolated_instance=True).update({
-        "capture_enabled": True, "capture_always_on": always_on, "monitor_capture": True,
+        "capture_enabled": True, "capture_always_on": always_on, "monitor_capture": True, "overlay_mode": True,
     })
     client_options = {"base_url": f"http://127.0.0.1:{PORT}", "client": ("127.0.0.1", 50000)}
 
@@ -747,7 +750,7 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
 
     def make_demand(svc):
         svc.engine.settings_changed()
-        if viewer_open:
+        if not always_on:
             svc.engine.set_demand("viewer", True)
         svc.engine.retry_now(manual=True)
 
@@ -759,6 +762,8 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
         assert not agent(client, "source_list").json()["active"]
         assert client.put("/api/settings", json={"capture_enabled": True}).status_code == 403
         assert agent(client, "settings_set", {"capture_enabled": True}).status_code == 403
+        assert client.put("/api/settings", json={"hdmi_armed": True}).status_code == 403
+        assert agent(client, "settings_set", {"hdmi_armed": True}).status_code == 400
         assert client.post(CAPTURE_CONTROL).status_code == 403
         monkeypatch.setattr(svc.sources, "_confirm", lambda *_: False)
         headers = capture_control_headers(client)
@@ -772,14 +777,20 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
         assert helper_called.wait(3)
         helper.assert_called_once()
         assert agent(client, "source_list").json()["active"]
-        assert agent(client, "source_select", SOURCE).raise_for_status().json()["mode"] == "monitor"
-        toggle = CAPTURE_CONTROL + "?target=monitor_capture"
-        ticket = client.post(toggle, headers=headers).json()["ticket"]
-        result = client.put(toggle, headers=headers, json={"ticket": ticket, "enabled": False})
-        assert result.raise_for_status().json()["active"] is False
+        if return_from != "disable_from_hdmi":
+            selected = "overlay" if return_from == "overlay" else "monitor"
+            assert agent(client, "source_select", {**SOURCE, "mode": selected}).raise_for_status().json()["mode"] == selected
+        if return_from.startswith("disable_"):
+            toggle = CAPTURE_CONTROL + "?target=monitor_capture"
+            ticket = client.post(toggle, headers=headers).json()["ticket"]
+            result = client.put(toggle, headers=headers, json={"ticket": ticket, "enabled": False})
+            assert result.raise_for_status().json()["active"] is False
+        else:
+            agent(client, "source_select", {"mode": "hdmi"}).raise_for_status()
         state = agent(client, "source_list").json()
         assert state["mode"] == "hdmi" and not state["active"]
         assert svc.settings["capture_enabled"] is True
+        assert svc.settings["hdmi_armed"] is False
         svc.engine.retry_now(manual=True)
         assert not svc.engine._run_once()
 
@@ -791,6 +802,57 @@ def test_hdmi_requires_confirmation_before_opening_and_after_automatic_return(
         assert restarted.settings["capture_enabled"] is True
         assert not agent(client, "source_list").json()["active"]
     helper.assert_called_once()
+
+
+@pytest.mark.parametrize("profile_type", ["confirmed", "legacy", "legacy_displays_available"])
+def test_hdmi_authorization_survives_normal_startup(tmp_path, monkeypatch, profile_type):
+    opened = threading.Event()
+
+    def helper_double():
+        opened.set()
+        raise BairdError("test_helper", "Device-free HDMI helper.")
+
+    monkeypatch.setattr(capture, "ensure_helper", helper_double)
+    config = Config(data_dir=tmp_path, port=PORT, isolated_instance=True, background=False)
+    client_options = {"base_url": f"http://127.0.0.1:{PORT}", "client": ("127.0.0.1", 50000)}
+    source = MonitorSource("unused-double", tmp_path, lambda: [MONITOR])
+
+    def make_service():
+        return Services(config, monitor_source=source, read_screen_policy=lambda: ScreenPolicy(False, ()),
+                        confirm_capture=confirm_test_shortcut)
+
+    if profile_type != "confirmed":
+        config.settings_path.write_text(json.dumps({
+            "capture_enabled": True, "device": "C835", "audio_input": "hdmi", "capture_always_on": False,
+            "monitor_capture": profile_type == "legacy_displays_available",
+        }), encoding="utf-8")
+    else:
+        svc = make_service()
+        with TestClient(create_app(config, svc), **client_options) as client:
+            set_local_capture(client, True)
+            assert svc.settings["hdmi_armed"] is True
+            assert not opened.is_set()
+
+    svc = make_service()
+    with TestClient(create_app(config, svc), **client_options) as client:
+        assert agent(client, "source_list").json()["active"]
+        assert not opened.is_set()
+        svc.engine.set_demand("viewer", True)
+        assert opened.wait(3)
+        client.put("/api/settings", json={"capture_enabled": False}).raise_for_status()
+        assert not agent(client, "source_list").json()["active"]
+    assert not make_service().engine.source_enabled()
+
+
+@pytest.mark.parametrize("saved", [
+    {}, {"capture_enabled": False}, {"capture_enabled": True, "source_mode": "hdmi"},
+    {"capture_enabled": True, "source_mode": "monitor"}, {"capture_enabled": True, "hdmi_armed": False},
+    {"capture_enabled": True, "monitor": {"id": MONITOR.id, "layout": layout_id([MONITOR])}},
+])
+def test_hdmi_migration_requires_saved_preference_without_display_history(tmp_path, saved):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(saved), encoding="utf-8")
+    assert Settings(path)["hdmi_armed"] is False
 
 
 def test_default_hdmi_profile_is_addressable_without_starting_a_helper(tmp_path, monkeypatch):

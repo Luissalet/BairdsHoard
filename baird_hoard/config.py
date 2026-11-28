@@ -54,7 +54,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "snapshot_format": "png",    # png (exact pixels) or jpg (smaller)
     "audio_input": "hdmi",       # hdmi (the sound that comes with the picture) or line (the 3.5 mm input)
     "capture_always_on": False,  # opt in to capture even without viewers, recordings or rules
-    "capture_enabled": True,     # capture card preference; local capture is authorized in memory
+    "capture_enabled": True,     # capture card preference
+    "hdmi_armed": False,         # local HDMI authorization, kept across restarts
     "monitor_capture": False,   # show this PC's display sources after a local opt-in
     "overlay_mode": False,       # allow the physical overlay source
     "source_mode": None,         # last source selection; None in profiles saved before this field
@@ -150,6 +151,11 @@ class Settings:
             data.update(capture_enabled=False, hotkeys_enabled=False)
         if isinstance(raw, dict):
             data.update({k: v for k, v in raw.items() if k in DEFAULT_SETTINGS})
+            # A legacy profile without a source selection or display binding
+            # still uses HDMI, even if display sources are available.
+            if ("hdmi_armed" not in raw and raw.get("capture_enabled") is True
+                    and raw.get("source_mode") is None and raw.get("monitor") is None):
+                data["hdmi_armed"] = True
         return normalize(data)
 
     def get(self) -> dict[str, Any]:
@@ -198,6 +204,8 @@ def normalize(data: dict[str, Any]) -> dict[str, Any]:
     if data["audio_input"] not in AUDIO_INPUTS and not (data["audio_input"].isdigit() and len(data["audio_input"]) == 1):
         raise ValueError("audio_input must be hdmi, line, spdif or a crossbar input number")
     data["capture_enabled"] = bool(data["capture_enabled"])
+    data["hdmi_armed"] = (data["hdmi_armed"] is True and data["capture_enabled"]
+                         and data["source_mode"] in (None, "hdmi"))
     data["monitor_capture"] = data["monitor_capture"] is True
     data["overlay_mode"] = data["overlay_mode"] is True
     if data["source_mode"] not in ("hdmi", "monitor", "overlay"):
