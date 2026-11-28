@@ -131,6 +131,8 @@ kbd {
 .row { display: grid; grid-template-columns: 190px minmax(0, 1fr); align-items: center; gap: 12px; font-size: 14px; }
 .row.switch { grid-template-columns: auto 1fr; }
 .row small { color: var(--hoard-text-dim); }
+#screen-privacy-settings { display: grid; justify-items: start; gap: 8px; }
+.screen-privacy-choices { display: flex; flex-wrap: wrap; gap: 6px; }
 .row select, .row input[type=text] {
   height: 34px; border-radius: var(--hoard-radius-sm); border: 1px solid var(--hoard-border); background: var(--hoard-deep); padding: 0 8px;
 }

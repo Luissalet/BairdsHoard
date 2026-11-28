@@ -6,6 +6,8 @@ In local Settings, enable **Displays on this PC** to add **Other display** and *
 
 The app checks the family's screen privacy settings before opening a local producer and rechecks during capture. Private mode, an excluded application on the selected display, an unconfirmed policy or a missing display stops local capture. Baird drops the incoming bytes before they reach the capture buffer and clears the live view. If recording, it keeps the portion already captured. If the authority initially cannot confirm permission and subsequently reports private mode or an exclusion for that display, the indicator updates to the confirmed reason. Confirm capture again after resolving the interruption.
 
+Next to **Displays on this PC**, Settings shows the choice saved in Talos and explains any privacy block. **Choose privacy** offers explicit private and not-private choices. Talos saves the choice even with its Screen module off. This does not enable the module or arm capture. The local Talos API defaults to `127.0.0.1:5220`. An isolated test can point `BAIRD_TALOS_URL` at its own loopback port.
+
 ## Agent tools
 
 - **source_list** reports the selected mode, screen activation, feature states and available display identities.
@@ -29,6 +31,8 @@ En un perfil nuevo, la barra empieza con **Capturadora**. La capturadora física
 En Ajustes desde este PC, activa **Pantallas de este PC** para añadir **Otra pantalla** y **Overlay físico** para añadir **Overlay**. Confirma cada interruptor con su atajo de Windows. Para capturar una pantalla, elígela, pulsa **Confirmar en ajustes** y confirma el interruptor de captura. El mismo interruptor detiene la captura. El perfil conserva los ajustes de las funciones y la fuente seleccionada. El permiso de captura local termina al cambiar de modo o pantalla y al cerrar Baird.
 
 Si se activa el modo privado, aparece una aplicación excluida, la pantalla cambia o Baird no puede comprobar la política, el visor local se apaga y se vacía la imagen en memoria, aunque la fuente haya dejado de enviar datos. Las capturas y los clips se preparan fuera del listado y de las descargas. Baird publica el archivo completo después de la última comprobación de privacidad y descarta los guardados en curso cuando se corta la fuente. Una grabación conserva el tramo anterior al corte. Baird consulta la política vigente antes de cada lectura del transporte y antes de entregar los datos a cada consumidor. Un aviso del Hub bloquea la fuente, detiene el productor y vacía el búfer de inmediato. Las lecturas y las entregas a consumidores comparten el bloqueo de la sesión. Baird espera a que terminen las lecturas y entregas autorizadas antes de confirmar el corte. Si la política se desconoce, la fuente queda apagada. Después de resolver la causa, vuelve a confirmar la captura.
+
+Junto a **Pantallas de este PC**, Ajustes muestra la elección guardada en Talos y explica el bloqueo de privacidad. En **Elegir privacidad** puedes guardar el estado privado o no privado aunque Pantalla esté apagada en Talos. El módulo conserva su estado de encendido y la autorización de captura se confirma por separado. La API local de Talos usa `127.0.0.1:5220` por defecto. Una prueba aislada puede usar su propio puerto local con `BAIRD_TALOS_URL`.
 
 Los agentes pueden listar las fuentes con **source_list**, elegirlas con **source_select** y volver a la selección anterior con **source_undo**. La activación de la pantalla local se hace desde Baird.
 

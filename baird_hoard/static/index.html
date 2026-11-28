@@ -162,6 +162,17 @@
     <form method="dialog" id="settings-form">
       <h2>Ajustes</h2>
       <label class="row switch"><input type="checkbox" name="monitor_capture" disabled> <span id="monitor-capture-label">Pantallas de este PC</span></label>
+      <div id="screen-privacy-settings">
+        <div class="row" role="status">
+          <span id="screen-privacy-status">Privacidad de pantalla</span>
+          <small id="screen-privacy-reason" hidden></small>
+        </div>
+        <button type="button" class="btn" id="choose-screen-privacy" aria-expanded="false" aria-controls="screen-privacy-choices" disabled>Elegir privacidad</button>
+        <div id="screen-privacy-choices" class="screen-privacy-choices" hidden>
+          <button type="button" class="btn" id="screen-privacy-private">Guardar como privada</button>
+          <button type="button" class="btn" id="screen-privacy-public">Guardar como no privada</button>
+        </div>
+      </div>
       <label class="row switch"><input type="checkbox" name="overlay_mode" disabled> <span id="overlay-mode-label">Overlay físico</span></label>
       <label class="row switch"><input type="checkbox" name="capture_enabled"> <span id="capture-enabled-label">Captura activada <small>(desactívala para usar la capturadora en otro programa)</small></span></label>
       <label class="row switch"><input type="checkbox" name="capture_always_on"> <span>Captura siempre activa <small>(opcional. Las reaperturas repetidas del controlador antiguo contribuyeron al pantallazo azul del 12 de noviembre)</small></span></label>
